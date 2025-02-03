@@ -5,14 +5,16 @@ import torch.nn.functional as F
 from torch import nn, einsum
 from einops import rearrange, repeat
 from typing import Optional, Any
+import bcos
 
 from ldm.modules.diffusionmodules.util import checkpoint
+import ldm.modules.diffusionmodules.bcosmodules as _bcos
 
 
 try:
-    import xformers
-    import xformers.ops
-    XFORMERS_IS_AVAILBLE = True
+    #import xformers
+    #import xformers.ops
+    XFORMERS_IS_AVAILBLE = False # do not use it for now as we cannot use it with B-cos
 except:
     XFORMERS_IS_AVAILBLE = False
 
@@ -46,30 +48,32 @@ def init_(tensor):
 
 
 # feedforward
-class GEGLU(nn.Module):
-    def __init__(self, dim_in, dim_out):
+class GEGLU(bcos.modules.common.DetachableModule):
+    def __init__(self, dim_in, dim_out, use_bcos=False, B=2, max_out=2):
         super().__init__()
-        self.proj = nn.Linear(dim_in, dim_out * 2)
+        self.proj = _bcos.linear(dim_in, dim_out * 2, use_bcos=use_bcos, b=B, max_out=max_out)
 
     def forward(self, x):
         x, gate = self.proj(x).chunk(2, dim=-1)
+        if self.detach:
+            gate = gate.detach()
         return x * F.gelu(gate)
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, dim_out=None, mult=4, glu=False, dropout=0.):
+    def __init__(self, dim, dim_out=None, mult=4, glu=False, dropout=0., use_bcos=False, B=2, max_out=2):
         super().__init__()
         inner_dim = int(dim * mult)
         dim_out = default(dim_out, dim)
         project_in = nn.Sequential(
-            nn.Linear(dim, inner_dim),
-            nn.GELU()
-        ) if not glu else GEGLU(dim, inner_dim)
+            _bcos.linear(dim, inner_dim, use_bcos=use_bcos, b=B, max_out=max_out),
+            _bcos.GELU()
+        ) if not glu else GEGLU(dim, inner_dim, use_bcos=use_bcos, B=B, max_out=max_out)
 
         self.net = nn.Sequential(
             project_in,
             nn.Dropout(dropout),
-            nn.Linear(inner_dim, dim_out)
+            _bcos.linear(inner_dim, dim_out, use_bcos=use_bcos, b=B, max_out=max_out)
         )
 
     def forward(self, x):
@@ -85,16 +89,16 @@ def zero_module(module):
     return module
 
 
-def Normalize(in_channels):
-    return torch.nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
+def Normalize(in_channels, use_bcos=False):
+    return _bcos.normalization(num_channels=in_channels, eps=1e-6, affine=not use_bcos)
 
 
 class SpatialSelfAttention(nn.Module):
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, use_bcos=False):
         super().__init__()
         self.in_channels = in_channels
 
-        self.norm = Normalize(in_channels)
+        self.norm = Normalize(in_channels, use_bcos)
         self.q = torch.nn.Conv2d(in_channels,
                                  in_channels,
                                  kernel_size=1,
@@ -142,8 +146,8 @@ class SpatialSelfAttention(nn.Module):
         return x+h_
 
 
-class CrossAttention(nn.Module):
-    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.):
+class CrossAttention(bcos.modules.common.DetachableModule): 
+    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0, use_bcos=False, B=2, max_out=2):
         super().__init__()
         inner_dim = dim_head * heads
         context_dim = default(context_dim, query_dim)
@@ -153,15 +157,19 @@ class CrossAttention(nn.Module):
 
         self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
         self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
-        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
+        self.to_v = _bcos.linear(context_dim, inner_dim, bias=False, use_bcos=use_bcos, b=B, max_out=max_out)
 
         self.to_out = nn.Sequential(
-            nn.Linear(inner_dim, query_dim),
+            _bcos.linear(inner_dim, query_dim, use_bcos=use_bcos, b=B, max_out=max_out),
             nn.Dropout(dropout)
         )
 
     def forward(self, x, context=None, mask=None):
         h = self.heads
+
+        if self.detach:
+            q = q.detach()
+            k = k.detach()
 
         q = self.to_q(x)
         context = default(context, x)
@@ -178,8 +186,11 @@ class CrossAttention(nn.Module):
         else:
             sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
         
-        del q, k
-    
+        #del q, k
+        
+        #simmx = sim.max(dim=-1, keepdim=True).values.detach()
+        #sim -= simmx # for stability
+
         if exists(mask):
             mask = rearrange(mask, 'b ... -> b (...)')
             max_neg_value = -torch.finfo(sim.dtype).max
@@ -249,20 +260,22 @@ class BasicTransformerBlock(nn.Module):
         "softmax-xformers": MemoryEfficientCrossAttention
     }
     def __init__(self, dim, n_heads, d_head, dropout=0., context_dim=None, gated_ff=True, checkpoint=True,
-                 disable_self_attn=False):
+                 disable_self_attn=False, use_bcos=False, B=2, max_out=2):
         super().__init__()
         attn_mode = "softmax-xformers" if XFORMERS_IS_AVAILBLE else "softmax"
         assert attn_mode in self.ATTENTION_MODES
         attn_cls = self.ATTENTION_MODES[attn_mode]
         self.disable_self_attn = disable_self_attn
         self.attn1 = attn_cls(query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout,
-                              context_dim=context_dim if self.disable_self_attn else None)  # is a self-attention if not self.disable_self_attn
-        self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff)
+                              context_dim=context_dim if self.disable_self_attn else None,
+                              use_bcos=use_bcos, B=B, max_out=max_out)  # is a self-attention if not self.disable_self_attn
+        self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff, use_bcos=use_bcos, B=B, max_out=max_out)
         self.attn2 = attn_cls(query_dim=dim, context_dim=context_dim,
-                              heads=n_heads, dim_head=d_head, dropout=dropout)  # is self-attn if context is none
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
-        self.norm3 = nn.LayerNorm(dim)
+                              heads=n_heads, dim_head=d_head, dropout=dropout,
+                              use_bcos=use_bcos, B=B, max_out=max_out)  # is self-attn if context is none
+        self.norm1 = _bcos.LayerNorm(dim, use_bcos=use_bcos)
+        self.norm2 = _bcos.LayerNorm(dim, use_bcos=use_bcos)
+        self.norm3 = _bcos.LayerNorm(dim, use_bcos=use_bcos)
         self.checkpoint = checkpoint
 
     def forward(self, x, context=None):
@@ -275,7 +288,7 @@ class BasicTransformerBlock(nn.Module):
         return x
 
 
-class SpatialTransformer(nn.Module):
+class SpatialTransformer(nn.Module): 
     """
     Transformer block for image-like data.
     First, project the input (aka embedding)
@@ -287,35 +300,43 @@ class SpatialTransformer(nn.Module):
     def __init__(self, in_channels, n_heads, d_head,
                  depth=1, dropout=0., context_dim=None,
                  disable_self_attn=False, use_linear=False,
-                 use_checkpoint=True):
+                 use_checkpoint=True, use_bcos=False, 
+                 B=2, max_out=2):
         super().__init__()
         if exists(context_dim) and not isinstance(context_dim, list):
             context_dim = [context_dim]
         self.in_channels = in_channels
         inner_dim = n_heads * d_head
-        self.norm = Normalize(in_channels)
+        self.norm = Normalize(in_channels, use_bcos)
         if not use_linear:
-            self.proj_in = nn.Conv2d(in_channels,
+            self.proj_in = _bcos.conv_nd(2, in_channels,
                                      inner_dim,
                                      kernel_size=1,
                                      stride=1,
-                                     padding=0)
+                                     padding=0,
+                                     use_bcos=use_bcos,
+                                     B=B,
+                                     max_out=max_out)
         else:
-            self.proj_in = nn.Linear(in_channels, inner_dim)
+            self.proj_in = _bcos.linear(in_channels, inner_dim, use_bcos=use_bcos, b=B, max_out=max_out)
 
         self.transformer_blocks = nn.ModuleList(
             [BasicTransformerBlock(inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim[d],
-                                   disable_self_attn=disable_self_attn, checkpoint=use_checkpoint)
+                                   disable_self_attn=disable_self_attn, checkpoint=use_checkpoint,
+                                   use_bcos=use_bcos, B=B, max_out=max_out)
                 for d in range(depth)]
         )
         if not use_linear:
-            self.proj_out = zero_module(nn.Conv2d(inner_dim,
+            self.proj_out = _bcos.zero_module(_bcos.conv_nd(2, inner_dim,
                                                   in_channels,
                                                   kernel_size=1,
                                                   stride=1,
-                                                  padding=0))
+                                                  padding=0,
+                                                  use_bcos=use_bcos,
+                                                  B=B,
+                                                  max_out=max_out))
         else:
-            self.proj_out = zero_module(nn.Linear(in_channels, inner_dim))
+            self.proj_out = _bcos.zero_module(_bcos.linear(in_channels, inner_dim, use_bcos=use_bcos, b=B, max_out=max_out))
         self.use_linear = use_linear
 
     def forward(self, x, context=None):

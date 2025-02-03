@@ -28,13 +28,16 @@ model:
         model_channels: 320 # What is this?
         attention_resolutions: [ 4, 2, 1 ] # What is this?
         num_res_blocks: 2 # What is this?
-        channel_mult: [ 1, 2, 4, 4 ] # What is this?
+        channel_mult: [ 1, 2, 4 ] # Original: [1,2,4,4]
         num_head_channels: 64 # need to fix for flash-attn # What is this?
-        use_spatial_transformer: True # What is this?
+        use_spatial_transformer: True 
         use_linear_in_transformer: True # What is this?
         transformer_depth: 1 # What is this?
         context_dim: 1024 # What is this?
-        legacy: False # What is this?
+        legacy: False
+        use_bcos: True
+        B: 2
+        max_out: 1
 
     first_stage_config: 
       target: ldm.models.autoencoder.IdentityFirstStage
@@ -74,31 +77,33 @@ data:
     train:
       target: ldm.data.personalized.PersonalizedBase
       params:
-        size: 64
-        set: train
-        per_image_tokens: false
-        repeats: 100
-        
+        n: 100000
     validation:
       target: ldm.data.personalized.PersonalizedBase
       params:
-        size: 64
-        set: val
-        per_image_tokens: false
-        repeats: 10
+        n: 100
 lightning:
   modelcheckpoint:
     params:
-      every_n_train_steps: 4000
+      every_n_train_steps: 50000
   callbacks:
     image_logger:
       target: main.ImageLogger
       params:
-        batch_frequency: 2000
+        batch_frequency: 20000
         max_images: 8
         increase_log_steps: False
+        log_images_kwargs: 
+          inpaint: False
 
   trainer:
     benchmark: True
-    max_steps: 8000
+    max_steps: 200000
+    accumulate_grad_batches: 1
+    #gradient_clip_val: 0.1
+    #profiler: "simple"
     gpus: "0" # what do you want here?
+    logger:
+      target: pytorch_lightning.loggers.WandbLogger
+      params: 
+        project: "SD"

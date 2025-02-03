@@ -5,16 +5,19 @@ import numpy as np
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
+import bcos 
 
 from ldm.modules.diffusionmodules.util import (
     checkpoint,
     conv_nd,
     linear,
     avg_pool_nd,
-    zero_module,
     normalization,
     timestep_embedding,
 )
+
+import ldm.modules.diffusionmodules.bcosmodules as _bcos
+
 from ldm.modules.attention import SpatialTransformer
 from ldm.util import exists
 
@@ -28,7 +31,7 @@ def convert_module_to_f32(x):
 
 
 ## go
-class AttentionPool2d(nn.Module):
+class AttentionPool2d(nn.Module): 
     """
     Adapted from CLIP: https://github.com/openai/CLIP/blob/main/clip/model.py
     """
@@ -41,6 +44,7 @@ class AttentionPool2d(nn.Module):
         output_dim: int = None,
     ):
         super().__init__()
+        print("Warning: AttentionPool2d should be unused and has not been B-cosified.")
         self.positional_embedding = nn.Parameter(th.randn(embed_dim, spacial_dim ** 2 + 1) / embed_dim ** 0.5)
         self.qkv_proj = conv_nd(1, embed_dim, 3 * embed_dim, 1)
         self.c_proj = conv_nd(1, embed_dim, output_dim or embed_dim, 1)
@@ -96,14 +100,14 @@ class Upsample(nn.Module):
                  upsampling occurs in the inner-two dimensions.
     """
 
-    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1):
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, use_bcos=False, B=2, max_out=2):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
         self.use_conv = use_conv
         self.dims = dims
         if use_conv:
-            self.conv = conv_nd(dims, self.channels, self.out_channels, 3, padding=padding)
+            self.conv = _bcos.conv_nd(dims, self.channels, self.out_channels, 3, padding=padding, use_bcos=use_bcos, B=B, max_out=max_out)
 
     def forward(self, x):
         assert x.shape[1] == self.channels
@@ -121,6 +125,8 @@ class TransposedUpsample(nn.Module):
     'Learned 2x upsampling without padding'
     def __init__(self, channels, out_channels=None, ks=5):
         super().__init__()
+        print("Warning: TransposedUpsample should be unused and has not been B-cosified.")
+        # We have the implementation for this in the other repository, so should maybe be added later
         self.channels = channels
         self.out_channels = out_channels or channels
 
@@ -147,12 +153,12 @@ class Downsample(nn.Module):
         self.dims = dims
         stride = 2 if dims != 3 else (1, 2, 2)
         if use_conv:
-            self.op = conv_nd(
+            self.op = _bcos.conv_nd(
                 dims, self.channels, self.out_channels, 3, stride=stride, padding=padding
             )
         else:
             assert self.channels == self.out_channels
-            self.op = avg_pool_nd(dims, kernel_size=stride, stride=stride)
+            self.op = avg_pool_nd(dims, kernel_size=stride, stride=stride) # should be compatible with B-cos - potentially check
 
     def forward(self, x):
         assert x.shape[1] == self.channels
@@ -187,6 +193,9 @@ class ResBlock(TimestepBlock):
         use_checkpoint=False,
         up=False,
         down=False,
+        use_bcos=False,
+        B=2,
+        max_out=2
     ):
         super().__init__()
         self.channels = channels
@@ -198,46 +207,49 @@ class ResBlock(TimestepBlock):
         self.use_scale_shift_norm = use_scale_shift_norm
 
         self.in_layers = nn.Sequential(
-            normalization(channels),
-            nn.SiLU(),
-            conv_nd(dims, channels, self.out_channels, 3, padding=1),
+            _bcos.normalization(channels, use_bcos),
+            _bcos.SiLU(use_bcos)(),
+            _bcos.conv_nd(dims, channels, self.out_channels, 3, padding=1, use_bcos=use_bcos, B=B, max_out=max_out),
         )
 
         self.updown = up or down
 
         if up:
-            self.h_upd = Upsample(channels, False, dims)
-            self.x_upd = Upsample(channels, False, dims)
+            self.h_upd = Upsample(channels, False, dims, use_bcos=False, B=2, max_out=2)
+            self.x_upd = Upsample(channels, False, dims, use_bcos=False, B=2, max_out=2)
         elif down:
-            self.h_upd = Downsample(channels, False, dims)
-            self.x_upd = Downsample(channels, False, dims)
+            self.h_upd = Downsample(channels, False, dims, use_bcos=False, B=2, max_out=2)
+            self.x_upd = Downsample(channels, False, dims, use_bcos=False, B=2, max_out=2)
         else:
             self.h_upd = self.x_upd = nn.Identity()
 
         self.emb_layers = nn.Sequential(
-            nn.SiLU(),
-            linear(
+            _bcos.SiLU(use_bcos)(),
+            _bcos.linear(
                 emb_channels,
                 2 * self.out_channels if use_scale_shift_norm else self.out_channels,
+                use_bcos=use_bcos,
+                b=B,
+                max_out=max_out
             ),
         )
         self.out_layers = nn.Sequential(
-            normalization(self.out_channels),
-            nn.SiLU(),
+            _bcos.normalization(self.out_channels, use_bcos=use_bcos),
+            _bcos.SiLU(use_bcos)(),
             nn.Dropout(p=dropout),
-            zero_module(
-                conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1)
+            _bcos.zero_module(
+                _bcos.conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1, use_bcos=use_bcos, B=B, max_out=max_out)
             ),
         )
 
         if self.out_channels == channels:
             self.skip_connection = nn.Identity()
         elif use_conv:
-            self.skip_connection = conv_nd(
-                dims, channels, self.out_channels, 3, padding=1
+            self.skip_connection = _bcos.conv_nd(
+                dims, channels, self.out_channels, 3, padding=1, use_bcos=use_bcos, B=B, max_out=max_out
             )
         else:
-            self.skip_connection = conv_nd(dims, channels, self.out_channels, 1)
+            self.skip_connection = _bcos.conv_nd(dims, channels, self.out_channels, 1, use_bcos=use_bcos, B=B, max_out=max_out)
 
     def forward(self, x, emb):
         """
@@ -274,7 +286,7 @@ class ResBlock(TimestepBlock):
         return self.skip_connection(x) + h
 
 
-class AttentionBlock(nn.Module):
+class AttentionBlock(bcos.modules.common.DetachableModule): 
     """
     An attention block that allows spatial positions to attend to each other.
     Originally ported from here, but adapted to the N-d case.
@@ -288,6 +300,9 @@ class AttentionBlock(nn.Module):
         num_head_channels=-1,
         use_checkpoint=False,
         use_new_attention_order=False,
+        use_bcos=False,
+        B=2,
+        max_out=2
     ):
         super().__init__()
         self.channels = channels
@@ -299,16 +314,17 @@ class AttentionBlock(nn.Module):
             ), f"q,k,v channels {channels} is not divisible by num_head_channels {num_head_channels}"
             self.num_heads = channels // num_head_channels
         self.use_checkpoint = use_checkpoint
-        self.norm = normalization(channels)
-        self.qkv = conv_nd(1, channels, channels * 3, 1)
+        self.norm = _bcos.normalization(channels, use_bcos)
+        self.qk = conv_nd(1, channels, channels * 2, 1) 
+        self.v = _bcos.conv_nd(1, channels, channels, 1, use_bcos=use_bcos, B=B, max_out=max_out) 
         if use_new_attention_order:
             # split qkv before split heads
-            self.attention = QKVAttention(self.num_heads)
+            self.attention = QKVAttention(self.num_heads, use_bcos=use_bcos, B=B, max_out=max_out) 
         else:
             # split heads before split qkv
             self.attention = QKVAttentionLegacy(self.num_heads)
 
-        self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
+        self.proj_out = _bcos.zero_module(_bcos.conv_nd(1, channels, channels, 1))
 
     def forward(self, x):
         return checkpoint(self._forward, (x,), self.parameters(), True)   # TODO: check checkpoint usage, is True # TODO: fix the .half call!!!
@@ -316,8 +332,11 @@ class AttentionBlock(nn.Module):
 
     def _forward(self, x):
         b, c, *spatial = x.shape
-        x = x.reshape(b, c, -1)
-        qkv = self.qkv(self.norm(x))
+        x = self.norm(x.reshape(b, c, -1))
+        s = self.qk(x)
+        if self.detach:
+            s = s.detach()
+        qkv = torch.concat((s,self.v(x)), dim=-2)
         h = self.attention(qkv)
         h = self.proj_out(h)
         return (x + h).reshape(b, c, *spatial)
@@ -343,13 +362,14 @@ def count_flops_attn(model, _x, y):
     model.total_ops += th.DoubleTensor([matmul_ops])
 
 
-class QKVAttentionLegacy(nn.Module):
+class QKVAttentionLegacy(nn.Module): 
     """
     A module which performs QKV attention. Matches legacy QKVAttention + input/ouput heads shaping
     """
 
     def __init__(self, n_heads):
         super().__init__()
+        print("Warning QKVAttentionLecacy has not been B-cosified.")
         self.n_heads = n_heads
 
     def forward(self, qkv):
@@ -394,6 +414,9 @@ class QKVAttention(nn.Module):
         assert width % (3 * self.n_heads) == 0
         ch = width // (3 * self.n_heads)
         q, k, v = qkv.chunk(3, dim=1)
+        if self.detach:
+            q = q.detach()
+            k = k.detach()
         scale = 1 / math.sqrt(math.sqrt(ch))
         weight = th.einsum(
             "bct,bcs->bts",
@@ -480,6 +503,9 @@ class UNetModel(nn.Module):
         disable_middle_self_attn=False,
         use_linear_in_transformer=False,
         adm_in_channels=None,
+        use_bcos=False,
+        B=2,
+        max_out=2
     ):
         super().__init__()
         if use_spatial_transformer:
@@ -539,10 +565,16 @@ class UNetModel(nn.Module):
         self.time_embed = nn.Sequential(
             linear(model_channels, time_embed_dim),
             nn.SiLU(),
-            linear(time_embed_dim, time_embed_dim),
+            linear(time_embed_dim, time_embed_dim)
         )
+        """
+        _bcos.linear(model_channels, time_embed_dim, use_bcos=use_bcos, B=B, max_out=max_out),
+        _bcos.SiLU(use_bcos)(),
+        _bcos.linear(time_embed_dim, time_embed_dim, use_bcos=use_bcos, B=B, max_out=max_out),
+        """
 
         if self.num_classes is not None:
+            print("Warning: num_classes in UNetModel has not been B-cosified")
             if isinstance(self.num_classes, int):
                 self.label_emb = nn.Embedding(num_classes, time_embed_dim)
             elif self.num_classes == "continuous":
@@ -550,7 +582,7 @@ class UNetModel(nn.Module):
                 self.label_emb = nn.Linear(1, time_embed_dim)
             elif self.num_classes == "sequential":
                 assert adm_in_channels is not None
-                self.label_emb = nn.Sequential(
+                self.label_emb = nn.Sequential( 
                     nn.Sequential(
                         linear(adm_in_channels, time_embed_dim),
                         nn.SiLU(),
@@ -563,7 +595,7 @@ class UNetModel(nn.Module):
         self.input_blocks = nn.ModuleList(
             [
                 TimestepEmbedSequential(
-                    conv_nd(dims, in_channels, model_channels, 3, padding=1)
+                    _bcos.conv_nd(dims, in_channels, model_channels, 3, padding=1, use_bcos=use_bcos, B=B, max_out=max_out)
                 )
             ]
         )
@@ -582,6 +614,9 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
+                        use_bcos=use_bcos,
+                        B=B,
+                        max_out=max_out
                     )
                 ]
                 ch = mult * model_channels
@@ -610,7 +645,7 @@ class UNetModel(nn.Module):
                             ) if not use_spatial_transformer else SpatialTransformer(
                                 ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim,
                                 disable_self_attn=disabled_sa, use_linear=use_linear_in_transformer,
-                                use_checkpoint=use_checkpoint
+                                use_checkpoint=use_checkpoint, use_bcos=use_bcos, B=B, max_out=max_out
                             )
                         )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
@@ -629,6 +664,9 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             down=True,
+                            use_bcos=use_bcos,
+                            B=B,
+                            max_out=max_out
                         )
                         if resblock_updown
                         else Downsample(
@@ -657,6 +695,9 @@ class UNetModel(nn.Module):
                 dims=dims,
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
+                use_bcos=use_bcos,
+                B=B,
+                max_out=max_out
             ),
             AttentionBlock(
                 ch,
@@ -664,10 +705,10 @@ class UNetModel(nn.Module):
                 num_heads=num_heads,
                 num_head_channels=dim_head,
                 use_new_attention_order=use_new_attention_order,
-            ) if not use_spatial_transformer else SpatialTransformer(  # always uses a self-attn
+            ) if not use_spatial_transformer else SpatialTransformer( # always uses a self-attn
                             ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim,
                             disable_self_attn=disable_middle_self_attn, use_linear=use_linear_in_transformer,
-                            use_checkpoint=use_checkpoint
+                            use_checkpoint=use_checkpoint, use_bcos=use_bcos, B=B, max_out=max_out
                         ),
             ResBlock(
                 ch,
@@ -676,6 +717,9 @@ class UNetModel(nn.Module):
                 dims=dims,
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
+                use_bcos=use_bcos,
+                B=B,
+                max_out=max_out
             ),
         )
         self._feature_size += ch
@@ -693,6 +737,9 @@ class UNetModel(nn.Module):
                         dims=dims,
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
+                        use_bcos=use_bcos,
+                        B=B,
+                        max_out=max_out
                     )
                 ]
                 ch = model_channels * mult
@@ -718,10 +765,16 @@ class UNetModel(nn.Module):
                                 num_heads=num_heads_upsample,
                                 num_head_channels=dim_head,
                                 use_new_attention_order=use_new_attention_order,
+                                use_bcos=use_bcos,
+                                B=B,
+                                max_out=max_out
                             ) if not use_spatial_transformer else SpatialTransformer(
                                 ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim,
                                 disable_self_attn=disabled_sa, use_linear=use_linear_in_transformer,
-                                use_checkpoint=use_checkpoint
+                                use_checkpoint=use_checkpoint,
+                                use_bcos=use_bcos,
+                                B=B,
+                                max_out=max_out
                             )
                         )
                 if level and i == self.num_res_blocks[level]:
@@ -736,25 +789,30 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             up=True,
+                            use_bcos=use_bcos,
+                            B=B,
+                            max_out=max_out
                         )
                         if resblock_updown
-                        else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)
+                        else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch, use_bcos=use_bcos, B=B, max_out=max_out)
                     )
                     ds //= 2
                 self.output_blocks.append(TimestepEmbedSequential(*layers))
                 self._feature_size += ch
 
         self.out = nn.Sequential(
-            normalization(ch),
-            nn.SiLU(),
-            zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1)),
+            _bcos.normalization(ch, use_bcos), 
+            _bcos.SiLU(use_bcos)(),
+            _bcos.zero_module(_bcos.conv_nd(dims, model_channels, out_channels, 3, padding=1, use_bcos=use_bcos, B=B, max_out=max_out)),
         )
         if self.predict_codebook_ids:
             self.id_predictor = nn.Sequential(
-            normalization(ch),
-            conv_nd(dims, model_channels, n_embed, 1),
+            _bcos.normalization(ch, use_bcos),
+            _bcos.conv_nd(dims, model_channels, n_embed, 1, use_bcos=use_bcos, B=B, max_out=max_out),
             #nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
         )
+
+        print(self)
 
     def convert_to_fp16(self):
         """
@@ -794,11 +852,9 @@ class UNetModel(nn.Module):
             emb = emb + self.label_emb(y)
 
         h = x.type(self.dtype)
-        i = 0
         for module in self.input_blocks:
             h = module(h, emb, context)
             hs.append(h)
-            i+=1
         h = self.middle_block(h, emb, context)
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
