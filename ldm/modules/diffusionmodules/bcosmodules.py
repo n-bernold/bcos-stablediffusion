@@ -12,6 +12,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+# We use a custom implementation of BcosConv2d and BcosLinear as B-cosification does not necessarily require unit weights.
+# The code is copied from https://github.com/B-cos/B-cos-v2/blob/main/bcos/modules/
 
 class BcosConv2d(DetachableModule):
     """
@@ -69,6 +71,7 @@ class BcosConv2d(DetachableModule):
         # special (note no scale here! See BcosConv2dWithScale below)
         B: Union[int, float] = 2,
         max_out: int = 1,
+        unit_norm: bool = False,
         **kwargs,  # bias is always False
     ):
         assert max_out > 0, f"max_out should be greater than 0, was {max_out}"
@@ -87,8 +90,9 @@ class BcosConv2d(DetachableModule):
         self.device = device
         self.dtype = dtype
         self.bias = False
+        self.unit_norm = unit_norm
 
-        self.b = b
+        self.b = B
         self.max_out = max_out
 
         # check dilation
@@ -150,7 +154,10 @@ class BcosConv2d(DetachableModule):
 
         # Calculating the norm of input patches: ||x||
         norm = self.calc_patch_norms(in_tensor)
-        # wnorm =  LA.vector_norm(self.linear.weight, dim=(1, 2, 3), keepdim=True)
+        wnorm = 1
+        if not self.unit_norm:
+            wnorm = LA.vector_norm(self.linear.weight, dim=(1, 2, 3), keepdim=True)[:,0]
+        
         # Calculate the dynamic scale (|cos|^(B-1))
         # Note that cos = (x·ŵ)/||x||
         maybe_detached_out = out
@@ -159,9 +166,9 @@ class BcosConv2d(DetachableModule):
             norm = norm.detach()
 
         if self.b == 2:
-            dynamic_scaling = maybe_detached_out.abs() / (norm)
+            dynamic_scaling = maybe_detached_out.abs() / (norm*wnorm)
         else:
-            abs_cos = (maybe_detached_out / (norm)).abs() + 1e-6
+            abs_cos = (maybe_detached_out / (norm*wnorm)).abs() + 1e-6
             dynamic_scaling = abs_cos.pow(self.b - 1)
 
         # put everything together
@@ -276,6 +283,7 @@ class BcosLinear(DetachableModule):
         dtype=None,
         b: Union[int, float] = 2,
         max_out: int = 1,
+        unit_norm: bool = False
     ) -> None:
         assert not bias
         super().__init__()
@@ -285,7 +293,7 @@ class BcosLinear(DetachableModule):
 
         self.b = b
         self.max_out = max_out
-
+        self.unit_norm = unit_norm
         self.linear = nn.Linear(
             in_features,
             out_features * self.max_out,
@@ -320,7 +328,9 @@ class BcosLinear(DetachableModule):
 
         # Calculating the norm of input vectors ||x||
         norm = LA.vector_norm(in_tensor, dim=-1, keepdim=True) + 1e-12
-        wnorm = LA.vector_norm(self.linear.weight, dim=-1)
+        wnorm = 1
+        if not self.unit_norm:
+            wnorm = LA.vector_norm(self.linear.weight, dim=-1)
 
         # Calculate the dynamic scale (|cos|^(B-1))
         # Note that cos = (x·ŵ)/||x||
@@ -398,7 +408,7 @@ def linear(*args, **kwargs):
     """
     if kwargs.get("use_bcos", False):
         del kwargs["use_bcos"]
-        return BcosLinear(*args, **kwargs)
+        return bcos.modules.BcosLinear(*args, **kwargs) # TODO: Add switch for (un-)normalized Linear layer
     kwargs.pop("use_bcos", None)
     kwargs.pop("b", None)
     kwargs.pop("max_out", None)
@@ -411,7 +421,7 @@ def conv_nd(dims, *args, **kwargs):
     if kwargs.get("use_bcos", False):
         del kwargs["use_bcos"]
         if dims == 2:
-            return bcos.modules.BcosConv2d(*args, **kwargs)
+            return bcos.modules.BcosConv2d(*args, **kwargs) # TODO: Add switch for (un-)normalized Conv layer
         raise ValueError(f"unsupported dimensions: {dims}")
     else:
         kwargs.pop("use_bcos", None)
@@ -453,7 +463,7 @@ def zero_module(module):
     """
     Zero out the parameters of a module and return it.
     """
-    if isinstance(module, bcos.modules.BcosConv2d) or isinstance(module, bcos.modules.BcosLinear):
+    if isinstance(module, bcos.modules.BcosConv2d) or isinstance(module, bcos.modules.BcosLinear) or isinstance(module, BcosConv2d) or isinstance(module, BcosLinear):
         for p in module.parameters():
             p.detach().normal_(0.0, 1e-8) # we cannot set them to 0
         return module

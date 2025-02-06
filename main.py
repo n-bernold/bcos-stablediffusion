@@ -22,6 +22,7 @@ from ldm.data.base import Txt2ImgIterableBaseDataset
 from ldm.util import instantiate_from_config
 
 def load_model_from_config(config, ckpt, verbose=False):
+
     print(f"Loading model from {ckpt}")
     pl_sd = torch.load(ckpt, map_location="cpu")
     sd = pl_sd["state_dict"]
@@ -156,11 +157,6 @@ def get_parser(**parser_kwargs):
         type=str, 
         required=True, 
         help="Path to directory with training images")
-    
-    parser.add_argument("--reg_data_root", 
-        type=str, 
-        required=True, 
-        help="Path to directory with regularization images")
 
     parser.add_argument("--embedding_manager_ckpt", 
         type=str, 
@@ -213,16 +209,6 @@ def worker_init_fn(_):
         return np.random.seed(np.random.get_state()[1][current_id] + worker_id)
     else:
         return np.random.seed(np.random.get_state()[1][0] + worker_id)
-
-class ConcatDataset(Dataset):
-    def __init__(self, dataset):
-        self.dataset = dataset
-
-    def __getitem__(self, idx):
-        return self.dataset[idx]
-
-    def __len__(self):
-        return len(self.dataset)
     
 class DataModuleFromConfig(pl.LightningDataModule):
     def __init__(self, batch_size, train=None, validation=None, test=None, predict=None,
@@ -251,7 +237,8 @@ class DataModuleFromConfig(pl.LightningDataModule):
 
     def prepare_data(self):
         for data_cfg in self.dataset_configs.values():
-            instantiate_from_config(data_cfg)
+            pass
+            #instantiate_from_config(data_cfg) This seems useless?
 
     def setup(self, stage=None):
         self.datasets = dict(
@@ -268,8 +255,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
         else:
             init_fn = None
         train_set = self.datasets["train"]
-        concat_dataset = ConcatDataset(train_set)
-        return DataLoader(concat_dataset, batch_size=self.batch_size,
+        return DataLoader(train_set, batch_size=self.batch_size,
                           num_workers=self.num_workers, shuffle=False if is_iterable_dataset else True,
                           worker_init_fn=init_fn)
 
@@ -572,7 +558,7 @@ if __name__ == "__main__":
             assert os.path.isdir(opt.resume), opt.resume
             #logdir = opt.resume.rstrip("/")
             ckpt = os.path.join(logdir, "checkpoints", "last.ckpt")
-
+        print("Resuming training from:", ckpt)
         opt.resume_from_checkpoint = ckpt
         base_configs = sorted(glob.glob(os.path.join(logdir, "configs/*.yaml")))
         opt.base = base_configs + opt.base
@@ -629,8 +615,8 @@ if __name__ == "__main__":
         # if opt.init_word:
         #     config.model.params.personalization_config.params.initializer_words[0] = opt.init_word
 
-        config.data.params.train.params.placeholder_token = opt.class_word
-        config.data.params.validation.params.placeholder_token = opt.class_word
+        #config.data.params.train.params.placeholder_token = opt.class_word
+        #config.data.params.validation.params.placeholder_token = opt.class_word
 
         if opt.actual_resume:
             model = load_model_from_config(config, opt.actual_resume)
@@ -659,7 +645,7 @@ if __name__ == "__main__":
                 }
             },
         }
-        default_logger_cfg = default_logger_cfgs["testtube"]
+        default_logger_cfg = default_logger_cfgs["wandb"]
         if "logger" in lightning_config:
             logger_cfg = lightning_config.logger
         else:
@@ -753,6 +739,7 @@ if __name__ == "__main__":
 
         callbacks_cfg = OmegaConf.merge(default_callbacks_cfg, callbacks_cfg)
         if 'ignore_keys_callback' in callbacks_cfg and hasattr(trainer_opt, 'resume_from_checkpoint'):
+            print("This line is called")
             callbacks_cfg.ignore_keys_callback.params['ckpt_path'] = trainer_opt.resume_from_checkpoint
         elif 'ignore_keys_callback' in callbacks_cfg:
             del callbacks_cfg['ignore_keys_callback']
@@ -768,15 +755,18 @@ if __name__ == "__main__":
         config.data.params.validation.params.data_root = opt.data_root
         data = instantiate_from_config(config.data)
 
-        data = instantiate_from_config(config.data)
+        # data = instantiate_from_config(config.data)
         # NOTE according to https://pytorch-lightning.readthedocs.io/en/latest/datamodules.html
         # calling these ourselves should not be necessary but it is.
         # lightning still takes care of proper multiprocessing though
-        data.prepare_data()
-        data.setup()
+        
+        # Do we really need this call? Why?
+        # data.prepare_data()
+        #data.setup()
+        
         print("#### Data #####")
-        for k in data.datasets:
-            print(f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}")
+        #for k in data.datasets:
+        #    print(f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}")
 
         # configure learning rate
         bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate

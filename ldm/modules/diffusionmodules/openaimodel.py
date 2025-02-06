@@ -145,7 +145,7 @@ class Downsample(nn.Module):
                  downsampling occurs in the inner-two dimensions.
     """
 
-    def __init__(self, channels, use_conv, dims=2, out_channels=None,padding=1):
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, use_bcos=False, B=2, max_out=2):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
@@ -154,7 +154,7 @@ class Downsample(nn.Module):
         stride = 2 if dims != 3 else (1, 2, 2)
         if use_conv:
             self.op = _bcos.conv_nd(
-                dims, self.channels, self.out_channels, 3, stride=stride, padding=padding
+                dims, self.channels, self.out_channels, 3, stride=stride, padding=padding, use_bcos=False, B=2, max_out=2
             )
         else:
             assert self.channels == self.out_channels
@@ -207,7 +207,7 @@ class ResBlock(TimestepBlock):
         self.use_scale_shift_norm = use_scale_shift_norm
 
         self.in_layers = nn.Sequential(
-            _bcos.normalization(channels, use_bcos),
+            _bcos.normalization(channels, use_bcos=use_bcos),
             _bcos.SiLU(use_bcos)(),
             _bcos.conv_nd(dims, channels, self.out_channels, 3, padding=1, use_bcos=use_bcos, B=B, max_out=max_out),
         )
@@ -215,11 +215,11 @@ class ResBlock(TimestepBlock):
         self.updown = up or down
 
         if up:
-            self.h_upd = Upsample(channels, False, dims, use_bcos=False, B=2, max_out=2)
-            self.x_upd = Upsample(channels, False, dims, use_bcos=False, B=2, max_out=2)
+            self.h_upd = Upsample(channels, False, dims, use_bcos=use_bcos, B=B, max_out=max_out)
+            self.x_upd = Upsample(channels, False, dims, use_bcos=use_bcos, B=B, max_out=max_out)
         elif down:
-            self.h_upd = Downsample(channels, False, dims, use_bcos=False, B=2, max_out=2)
-            self.x_upd = Downsample(channels, False, dims, use_bcos=False, B=2, max_out=2)
+            self.h_upd = Downsample(channels, False, dims, use_bcos=use_bcos, B=B, max_out=max_out)
+            self.x_upd = Downsample(channels, False, dims, use_bcos=use_bcos, B=B, max_out=max_out)
         else:
             self.h_upd = self.x_upd = nn.Identity()
 
@@ -642,6 +642,9 @@ class UNetModel(nn.Module):
                                 num_heads=num_heads,
                                 num_head_channels=dim_head,
                                 use_new_attention_order=use_new_attention_order,
+                                use_bcos=use_bcos,
+                                B=B,
+                                max_out=max_out
                             ) if not use_spatial_transformer else SpatialTransformer(
                                 ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim,
                                 disable_self_attn=disabled_sa, use_linear=use_linear_in_transformer,
@@ -801,7 +804,7 @@ class UNetModel(nn.Module):
                 self._feature_size += ch
 
         self.out = nn.Sequential(
-            _bcos.normalization(ch, use_bcos), 
+            _bcos.normalization(ch, use_bcos=use_bcos), 
             _bcos.SiLU(use_bcos)(),
             _bcos.zero_module(_bcos.conv_nd(dims, model_channels, out_channels, 3, padding=1, use_bcos=use_bcos, B=B, max_out=max_out)),
         )
@@ -811,8 +814,6 @@ class UNetModel(nn.Module):
             _bcos.conv_nd(dims, model_channels, n_embed, 1, use_bcos=use_bcos, B=B, max_out=max_out),
             #nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
         )
-
-        print(self)
 
     def convert_to_fp16(self):
         """

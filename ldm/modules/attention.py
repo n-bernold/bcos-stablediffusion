@@ -90,7 +90,7 @@ def zero_module(module):
 
 
 def Normalize(in_channels, use_bcos=False):
-    return _bcos.normalization(num_channels=in_channels, eps=1e-6, affine=not use_bcos)
+    return _bcos.normalization(num_channels=in_channels, eps=1e-6, affine=not use_bcos, use_bcos=use_bcos)
 
 
 class SpatialSelfAttention(nn.Module):
