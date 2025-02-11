@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 2.0e-6
+  base_learning_rate: 1.0e-6
   target: ldm.models.diffusion.ddpm.LatentDiffusion
   params:
     linear_start: 0.00085
@@ -25,15 +25,15 @@ model:
         image_size: 32 # unused
         in_channels: 6 # Changed from 4
         out_channels: 6 # Changed from 4
-        model_channels: 320 # What is this?
-        attention_resolutions: [ 4, 2, 1 ] # What is this?
-        num_res_blocks: 2 # What is this?
-        channel_mult: [ 1, 2, 4 ] # Original: [1,2,4,4]
-        num_head_channels: 64 # need to fix for flash-attn # What is this?
+        model_channels: 320 
+        attention_resolutions: [ 4, 2, 1 ] 
+        num_res_blocks: 1 
+        channel_mult: [ 1, 1, 4, 4 ] # Original: [1,2,4,4]
+        num_head_channels: 64 # need to fix for flash-attn 
         use_spatial_transformer: True 
-        use_linear_in_transformer: True # What is this?
-        transformer_depth: 1 # What is this?
-        context_dim: 1024 # What is this?
+        use_linear_in_transformer: True 
+        transformer_depth: 1 
+        context_dim: 1024 
         legacy: False
         use_bcos: True
         B: 2
@@ -64,24 +64,32 @@ model:
           # target: torch.nn.Identity
 
     cond_stage_config: 
-      target: ldm.modules.encoders.modules.FrozenOpenCLIPEmbedder
-      params:
-        freeze: True
-        layer: "penultimate"
+      target: ldm.models.autoencoder.IdentityFirstStage
+      #target: ldm.modules.encoders.modules.FrozenOpenCLIPEmbedder
+      #params:
+      #  freeze: True
+      #  layer: "penultimate"
 data:
   target: main.DataModuleFromConfig
   params:
-    batch_size: 1
-    num_workers: 2
+    batch_size: 3
+    num_workers: 3
     wrap: false
     train:
       target: ldm.data.personalized.PersonalizedBase
       params:
         n: 100000
+        cache: "pbfgp100k.pt"
+        cond_stage_config: 
+          target: ldm.modules.encoders.modules.FrozenOpenCLIPEmbedder
+          params:
+            freeze: True
+            layer: "penultimate"
     validation:
       target: ldm.data.personalized.PersonalizedBase
       params:
-        n: 100
+        n: 10
+        cache: "debug.pt"
 lightning:
   modelcheckpoint:
     params:
@@ -90,19 +98,19 @@ lightning:
     image_logger:
       target: main.ImageLogger
       params:
-        batch_frequency: 20000
+        batch_frequency: 100000
         max_images: 8
         increase_log_steps: False
         log_images_kwargs: 
           inpaint: False
-
   trainer:
     benchmark: True
-    max_steps: 200000
+    max_steps: 2000000
     accumulate_grad_batches: 1
+    auto_select_gpus: True
     #gradient_clip_val: 0.1
     #profiler: "simple"
-    gpus: "0" # what do you want here?
+    gpus: "-1"
     logger:
       target: pytorch_lightning.loggers.WandbLogger
       params: 

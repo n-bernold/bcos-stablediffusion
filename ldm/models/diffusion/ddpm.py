@@ -27,6 +27,8 @@ from ldm.models.autoencoder import IdentityFirstStage, AutoencoderKL
 from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor, noise_like
 from ldm.models.diffusion.ddim import DDIMSampler
 
+from bcos.common import BcosUtilMixin
+
 
 __conditioning_keys__ = {'concat': 'c_concat',
                          'crossattn': 'c_crossattn',
@@ -43,7 +45,7 @@ def uniform_on_device(r1, r2, shape, device):
     return (r1 - r2) * torch.rand(*shape, device=device) + r2
 
 
-class DDPM(pl.LightningModule):
+class DDPM(BcosUtilMixin, pl.LightningModule):
     # classic DDPM with Gaussian diffusion, in image space
     def __init__(self,
                  unet_config,
@@ -641,7 +643,7 @@ class LatentDiffusion(DDPM):
     def _get_denoise_row_from_list(self, samples, desc='', force_no_decoder_quantization=False):
         denoise_row = []
         for zd in tqdm(samples, desc=desc):
-            denoise_row.append(self.decode_first_stage(zd.to(self.device),
+            denoise_row.append(self.decode_first_stage(self.bcos_to_image(zd.to(self.device)),
                                                        force_not_quantize=force_no_decoder_quantization))
         n_imgs_per_row = len(denoise_row)
         denoise_row = torch.stack(denoise_row)  # n_log_step, n_row, C, H, W
@@ -1022,6 +1024,7 @@ class LatentDiffusion(DDPM):
                                             quantize_denoised=quantize_denoised, return_x0=True,
                                             temperature=temperature[i], noise_dropout=noise_dropout,
                                             score_corrector=score_corrector, corrector_kwargs=corrector_kwargs)
+
             if mask is not None:
                 assert x0 is not None
                 img_orig = self.q_sample(x0, ts)
@@ -1142,6 +1145,10 @@ class LatentDiffusion(DDPM):
         return c
 
     @torch.no_grad()
+    def bcos_to_image(self, x):
+        return x # 2*x - 1
+
+    @torch.no_grad()
     def log_images(self, batch, N=8, n_row=4, sample=True, ddim_steps=50, ddim_eta=0., return_keys=None,
                    quantize_denoised=True, inpaint=True, plot_denoise_rows=False, plot_progressive_rows=True,
                    plot_diffusion_rows=True, unconditional_guidance_scale=1., unconditional_guidance_label=None,
@@ -1193,7 +1200,7 @@ class LatentDiffusion(DDPM):
                     t = t.to(self.device).long()
                     noise = torch.randn_like(z_start)
                     z_noisy = self.q_sample(x_start=z_start, t=t, noise=noise)
-                    diffusion_row.append(self.decode_first_stage(z_noisy))
+                    diffusion_row.append(self.decode_first_stage(self.bcos_to_image(z_noisy)))
 
             diffusion_row = torch.stack(diffusion_row)  # n_log_step, n_row, C, H, W
             diffusion_grid = rearrange(diffusion_row, 'n b c h w -> b n c h w')
@@ -1207,7 +1214,7 @@ class LatentDiffusion(DDPM):
                 samples, z_denoise_row = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,
                                                          ddim_steps=ddim_steps, eta=ddim_eta)
                 # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
-            x_samples = self.decode_first_stage(samples)
+            x_samples = self.decode_first_stage(self.bcos_to_image(samples))
             log["samples"] = x_samples
             if plot_denoise_rows:
                 denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
@@ -1222,7 +1229,7 @@ class LatentDiffusion(DDPM):
                                                              quantize_denoised=True)
                     # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True,
                     #                                      quantize_denoised=True)
-                x_samples = self.decode_first_stage(samples.to(self.device))
+                x_samples = self.decode_first_stage(self.bcos_to_image(samples.to(self.device)))
                 log["samples_x0_quantized"] = x_samples
 
         if unconditional_guidance_scale > 1.0:
@@ -1235,7 +1242,7 @@ class LatentDiffusion(DDPM):
                                                  unconditional_guidance_scale=unconditional_guidance_scale,
                                                  unconditional_conditioning=uc,
                                                  )
-                x_samples_cfg = self.decode_first_stage(samples_cfg)
+                x_samples_cfg = self.decode_first_stage(self.bcos_to_image(samples_cfg))
                 log[f"samples_cfg_scale_{unconditional_guidance_scale:.2f}"] = x_samples_cfg
 
         if inpaint:
@@ -1248,7 +1255,7 @@ class LatentDiffusion(DDPM):
             with ema_scope("Plotting Inpaint"):
                 samples, _ = self.sample_log(cond=c, batch_size=N, ddim=use_ddim, eta=ddim_eta,
                                              ddim_steps=ddim_steps, x0=z[:N], mask=mask)
-            x_samples = self.decode_first_stage(samples.to(self.device))
+            x_samples = self.decode_first_stage(self.bcos_to_image(samples.to(self.device)))
             log["samples_inpainting"] = x_samples
             log["mask"] = mask
 
@@ -1257,7 +1264,7 @@ class LatentDiffusion(DDPM):
             with ema_scope("Plotting Outpaint"):
                 samples, _ = self.sample_log(cond=c, batch_size=N, ddim=use_ddim, eta=ddim_eta,
                                              ddim_steps=ddim_steps, x0=z[:N], mask=mask)
-            x_samples = self.decode_first_stage(samples.to(self.device))
+            x_samples = self.decode_first_stage(self.bcos_to_image(samples.to(self.device)))
             log["samples_outpainting"] = x_samples
 
         if plot_progressive_rows:

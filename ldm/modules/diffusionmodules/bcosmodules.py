@@ -446,17 +446,17 @@ class GroupNorm32(bcos.modules.norms.DetachableGroupNorm2d):
     def forward(self, x):
         return super().forward(x.float()).type(x.dtype)
 
-def normalization(num_channels, *args, **kwargs):
+def normalization(num_channels, use_bcos=False, *args, **kwargs):
     """
     Make a standard normalization layer.
     :param channels: number of input channels.
     :return: an nn.Module for normalization.
     """
-    if kwargs.get("use_bcos", False):
-        del kwargs["use_bcos"]
+    if use_bcos:
+        if not kwargs.get("affine", True):
+            return GroupNorm32(32, num_channels, *args, **kwargs)
         return bcos.modules.norms.NoBias(GroupNorm32)(32, num_channels, *args, **kwargs) 
     else:
-        kwargs.pop("use_bcos", None)
         return util.GroupNorm32(32, num_channels, *args, **kwargs)
 
 def zero_module(module):

@@ -154,7 +154,7 @@ class Downsample(nn.Module):
         stride = 2 if dims != 3 else (1, 2, 2)
         if use_conv:
             self.op = _bcos.conv_nd(
-                dims, self.channels, self.out_channels, 3, stride=stride, padding=padding, use_bcos=False, B=2, max_out=2
+                dims, self.channels, self.out_channels, 3, stride=stride, padding=padding, use_bcos=use_bcos, B=B, max_out=max_out
             )
         else:
             assert self.channels == self.out_channels
@@ -673,7 +673,7 @@ class UNetModel(nn.Module):
                         )
                         if resblock_updown
                         else Downsample(
-                            ch, conv_resample, dims=dims, out_channels=out_ch
+                            ch, conv_resample, dims=dims, out_channels=out_ch, use_bcos=use_bcos, B=B, max_out=max_out
                         )
                     )
                 )
@@ -708,6 +708,9 @@ class UNetModel(nn.Module):
                 num_heads=num_heads,
                 num_head_channels=dim_head,
                 use_new_attention_order=use_new_attention_order,
+                use_bcos=use_bcos,
+                B=B,
+                max_out=max_out
             ) if not use_spatial_transformer else SpatialTransformer( # always uses a self-attn
                             ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim,
                             disable_self_attn=disable_middle_self_attn, use_linear=use_linear_in_transformer,

@@ -274,6 +274,12 @@ class HybridConditioner(nn.Module):
 
 
 def noise_like(shape, device, repeat=False):
+    """ 6-channel noise?
+    if shape[1]==6:
+        repeat_noise = lambda: ((lambda x : torch.cat((x,1-x),dim=1))(torch.randn((1, 3, *shape[2:]), device=device))).repeat(shape[0], *((1,) * (len(shape) - 1)))
+        lambda: ((lambda x : torch.cat((x,1-x),dim=1))(torch.randn((shape[0], 3, *shape[2:]), device=device)))
+    else:
+    """
     repeat_noise = lambda: torch.randn((1, *shape[1:]), device=device).repeat(shape[0], *((1,) * (len(shape) - 1)))
     noise = lambda: torch.randn(shape, device=device)
     return repeat_noise() if repeat else noise()
