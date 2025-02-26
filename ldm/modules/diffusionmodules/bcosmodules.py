@@ -402,29 +402,29 @@ class GELU(DetachableModule):
             kAlpha = M_SQRT1_2
             return a * 0.5 * (1 + torch.erf(b * kAlpha))
 
-def linear(*args, **kwargs):
+def linear(*args, use_bcos=False, bcos_normalize=True, **kwargs):
     """
     Create a linear module.
     """
-    if kwargs.get("use_bcos", False):
-        del kwargs["use_bcos"]
-        return bcos.modules.BcosLinear(*args, **kwargs) # TODO: Add switch for (un-)normalized Linear layer
-    kwargs.pop("use_bcos", None)
+    if use_bcos:
+        if not bcos_normalize:
+            return BcosLinear(*args, **kwargs) 
+        return bcos.modules.BcosLinear(*args, **kwargs) 
     kwargs.pop("b", None)
     kwargs.pop("max_out", None)
     return util.linear(*args, **kwargs)
 
-def conv_nd(dims, *args, **kwargs):
+def conv_nd(dims, *args, use_bcos=False, bcos_normalize=True, **kwargs):
     """
     Create a 1D, 2D, or 3D convolution module.
     """
-    if kwargs.get("use_bcos", False):
-        del kwargs["use_bcos"]
+    if use_bcos:
         if dims == 2:
+            if not bcos_normalize:
+                return BcosConv2d(*args, **kwargs)
             return bcos.modules.BcosConv2d(*args, **kwargs) # TODO: Add switch for (un-)normalized Conv layer
         raise ValueError(f"unsupported dimensions: {dims}")
     else:
-        kwargs.pop("use_bcos", None)
         kwargs.pop("B", None)
         kwargs.pop("max_out", None)
         return util.conv_nd(dims, *args, **kwargs)

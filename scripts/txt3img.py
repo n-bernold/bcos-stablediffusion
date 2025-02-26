@@ -29,7 +29,10 @@ def load_model_from_config(config, ckpt=None, device=torch.device("cuda"), verbo
         ckpt = None
     if ckpt is not None:
         print(f"Loading model from {ckpt}")
-        pl_sd = torch.load(ckpt, map_location="cpu")
+        if device == torch.device("cuda"):
+            pl_sd = torch.load(ckpt)
+        elif device == torch.device("cpu"):
+            pl_sd = torch.load(ckpt, map_location="cpu")
         if "global_step" in pl_sd:
             print(f"Global Step: {pl_sd['global_step']}")
         sd = pl_sd["state_dict"]
@@ -60,7 +63,7 @@ def parse_args():
         "--prompt",
         type=str,
         nargs="?",
-        default="a professional photograph of an astronaut riding a triceratops",
+        default="A photo of a goat and a flamingo",
         help="the prompt to render"
     )
     parser.add_argument(
@@ -106,13 +109,13 @@ def parse_args():
     parser.add_argument(
         "--H",
         type=int,
-        default=512,
+        default=64,
         help="image height, in pixel space",
     )
     parser.add_argument(
         "--W",
         type=int,
-        default=512,
+        default=64,
         help="image width, in pixel space",
     )
     parser.add_argument(
@@ -124,7 +127,7 @@ def parse_args():
     parser.add_argument(
         "--f",
         type=int,
-        default=8,
+        default=1,
         help="downsampling factor, most often 8 or 16",
     )
     parser.add_argument(
@@ -153,7 +156,7 @@ def parse_args():
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/stable-diffusion/v2-inference.yaml",
+        default="configs/stable-diffusion/v2-bcos-inference.yaml",
         help="path to config which constructs model",
     )
     parser.add_argument(
@@ -219,6 +222,7 @@ def main(opt):
 
     config = OmegaConf.load(f"{opt.config}")
     device = torch.device("cuda") if opt.device == "cuda" else torch.device("cpu")
+    print("Device: ", device)
     model = load_model_from_config(config, f"{opt.ckpt}", device)
 
     if opt.plms:
@@ -254,9 +258,10 @@ def main(opt):
     start_code = None
     if opt.fixed_code:
         start_code = torch.randn([opt.n_samples, opt.C, opt.H // opt.f, opt.W // opt.f], device=device)
+        #start_code[:,3:,:,:] = 1- start_code[:,:3,:,:]
 
     if opt.torchscript or opt.ipex:
-        transformer = model.cond_stage_model.model
+        transformer = model.cond_stage_model.model # TODO
         unet = model.model.diffusion_model
         decoder = model.first_stage_model.decoder
         additional_context = torch.cpu.amp.autocast() if opt.bf16 else nullcontext()
@@ -313,9 +318,14 @@ def main(opt):
             prompts = list(prompts)
 
         with torch.no_grad(), additional_context:
-            for _ in range(3):
+            for _ in range(1): # Why does the original code here loop three times?
                 c = model.get_learned_conditioning(prompts)
-            samples_ddim, _ = sampler.sample(S=5,
+            if False:
+                samples_ddim, _ = model.sample(c, batch_size=batch_size,
+                                             shape=shape,
+                                             verbose=False)
+            else:
+                samples_ddim, _ = sampler.sample(S=5,
                                              conditioning=c,
                                              batch_size=batch_size,
                                              shape=shape,
@@ -324,8 +334,9 @@ def main(opt):
                                              unconditional_conditioning=uc,
                                              eta=opt.ddim_eta,
                                              x_T=start_code)
+            
             print("Running a forward pass for decoder")
-            for _ in range(3):
+            for _ in range(1): # Why does the original code here loop three times?
                 x_samples_ddim = model.decode_first_stage(samples_ddim)
 
     precision_scope = autocast if opt.precision=="autocast" or opt.bf16 else nullcontext

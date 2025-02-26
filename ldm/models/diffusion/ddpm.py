@@ -79,6 +79,9 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
                  ucg_training=None,
                  reset_ema=False,
                  reset_num_ema_updates=False,
+                 encode_noise=False,
+                 mean=0,
+                 stdev=1
                  ):
         super().__init__()
         assert parameterization in ["eps", "x0", "v"], 'currently only supporting "eps" and "x0" and "v"'
@@ -91,6 +94,9 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
         self.image_size = image_size  # try conv?
         self.channels = channels
         self.use_positional_encodings = use_positional_encodings
+        self.encode_noise = encode_noise
+        self.mean = mean
+        self.stdev = stdev
         self.model = DiffusionWrapper(unet_config, conditioning_key)
         count_params(self.model, verbose=True)
         self.use_ema = use_ema
@@ -160,14 +166,16 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
 
         # calculations for diffusion q(x_t | x_{t-1}) and others
         self.register_buffer('sqrt_alphas_cumprod', to_torch(np.sqrt(alphas_cumprod)))
+        self.register_buffer('one_minus_sqrt_alphas_cumprod', to_torch(1-np.sqrt(alphas_cumprod)))
         self.register_buffer('sqrt_one_minus_alphas_cumprod', to_torch(np.sqrt(1. - alphas_cumprod)))
         self.register_buffer('log_one_minus_alphas_cumprod', to_torch(np.log(1. - alphas_cumprod)))
         self.register_buffer('sqrt_recip_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod)))
         self.register_buffer('sqrt_recipm1_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod - 1)))
+        self.register_buffer('one_minus_recip_sqrt_alphas_cumprod', to_torch(1. - 1. / np.sqrt(alphas_cumprod)))
 
         # calculations for posterior q(x_{t-1} | x_t, x_0)
-        posterior_variance = (1 - self.v_posterior) * betas * (1. - alphas_cumprod_prev) / (
-                1. - alphas_cumprod) + self.v_posterior * betas
+        posterior_variance = ((1 - self.v_posterior) * betas * (1. - alphas_cumprod_prev) / (
+                1. - alphas_cumprod) + self.v_posterior * betas) * (self.stdev * self.stdev)
         # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
         self.register_buffer('posterior_variance', to_torch(posterior_variance))
         # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
@@ -176,7 +184,8 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
             betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)))
         self.register_buffer('posterior_mean_coef2', to_torch(
             (1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod)))
-
+        self.register_buffer('posterior_mean_coef3', to_torch(
+            1 - (betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod) + (1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod))))
         if self.parameterization == "eps":
             lvlb_weights = self.betas ** 2 / (
                     2 * self.posterior_variance * to_torch(alphas) * (1 - self.alphas_cumprod))
@@ -281,21 +290,24 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
         log_variance = extract_into_tensor(self.log_one_minus_alphas_cumprod, t, x_start.shape)
         return mean, variance, log_variance
 
-    def predict_start_from_noise(self, x_t, t, noise):
+    def predict_start_from_noise(self, x_t, t, noise): 
         return (
                 extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
-                extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
+                extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * self.stdev*noise +
+                extract_into_tensor(self.one_minus_recip_sqrt_alphas_cumprod, t, x_t.shape) * self.mean
         )
 
-    def predict_start_from_z_and_v(self, x_t, t, v):
+    def predict_start_from_z_and_v(self, x_t, t, v): # TODO?: Add option for mean - used by DDIM with certain settings
         # self.register_buffer('sqrt_alphas_cumprod', to_torch(np.sqrt(alphas_cumprod)))
         # self.register_buffer('sqrt_one_minus_alphas_cumprod', to_torch(np.sqrt(1. - alphas_cumprod)))
+        raise NotImplementedError("Not B-cosified")
         return (
                 extract_into_tensor(self.sqrt_alphas_cumprod, t, x_t.shape) * x_t -
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape) * v
         )
 
-    def predict_eps_from_z_and_v(self, x_t, t, v):
+    def predict_eps_from_z_and_v(self, x_t, t, v): # TODO?: Add option for mean - unused?
+        raise NotImplementedError("Not B-cosified")
         return (
                 extract_into_tensor(self.sqrt_alphas_cumprod, t, x_t.shape) * v +
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape) * x_t
@@ -304,8 +316,10 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
     def q_posterior(self, x_start, x_t, t):
         posterior_mean = (
                 extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_start +
-                extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t
+                extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t + 
+                extract_into_tensor(self.posterior_mean_coef3, t, x_t.shape) * self.mean 
         )
+        
         posterior_variance = extract_into_tensor(self.posterior_variance, t, x_t.shape)
         posterior_log_variance_clipped = extract_into_tensor(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
@@ -326,7 +340,7 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
     def p_sample(self, x, t, clip_denoised=True, repeat_noise=False):
         b, *_, device = *x.shape, x.device
         model_mean, _, model_log_variance = self.p_mean_variance(x=x, t=t, clip_denoised=clip_denoised)
-        noise = noise_like(x.shape, device, repeat_noise)
+        noise = noise_like(x.shape, device, repeat_noise, self.encode_noise)
         # no noise when t == 0
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
@@ -336,6 +350,9 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
         device = self.betas.device
         b = shape[0]
         img = torch.randn(shape, device=device)
+        if self.encode_noise:
+            img[...,3:,:,:] = -img[...,:3,:,:]
+        img = self.mean + self.stdev*img
         intermediates = [img]
         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='Sampling t', total=self.num_timesteps):
             img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long),
@@ -353,12 +370,17 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
         return self.p_sample_loop((batch_size, channels, image_size, image_size),
                                   return_intermediates=return_intermediates)
 
-    def q_sample(self, x_start, t, noise=None):
-        noise = default(noise, lambda: torch.randn_like(x_start))
+    def q_sample(self, x_start, t, noise=None): # Noise should be N(0,1), potentially encoded. No mean, no stdev.
+        if not exists(noise):
+            noise = torch.randn_like(x_start)
+            if self.encode_noise:
+                noise[...,3:,:,:] = -noise[...,:3,:,:]
         return (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
-                extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise)
+                extract_into_tensor(self.one_minus_sqrt_alphas_cumprod, t, x_start.shape) * self.mean +
+                extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * self.stdev * noise)
 
     def get_v(self, x, noise, t):
+        raise NotImplementedError("Not B-cosified")
         return (
                 extract_into_tensor(self.sqrt_alphas_cumprod, t, x.shape) * noise -
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x.shape) * x
@@ -380,7 +402,10 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
         return loss
 
     def p_losses(self, x_start, t, noise=None):
-        noise = default(noise, lambda: torch.randn_like(x_start))
+        if not exists(noise):
+            noise = torch.randn_like(x_start)
+            if self.encode_noise:
+                noise[...,3:,:,:] = -noise[...,:3,:,:]
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
         model_out = self.model(x_noisy, t)
 
@@ -441,11 +466,11 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
 
         loss, loss_dict = self.shared_step(batch)
 
-        self.log_dict(loss_dict, prog_bar=True,
+        self.log_dict(loss_dict, prog_bar=False,
                       logger=True, on_step=True, on_epoch=True)
 
         self.log("global_step", self.global_step,
-                 prog_bar=True, logger=True, on_step=True, on_epoch=False)
+                 prog_bar=False, logger=True, on_step=True, on_epoch=False)
 
         if self.use_scheduler:
             lr = self.optimizers().param_groups[0]['lr']
@@ -491,6 +516,8 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
                 t = repeat(torch.tensor([t]), '1 -> b', b=n_row)
                 t = t.to(self.device).long()
                 noise = torch.randn_like(x_start)
+                if self.encode_noise:
+                    noise[...,3:,:,:] = -noise[...,:3,:,:]
                 x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
                 diffusion_row.append(x_noisy)
 
@@ -610,6 +637,7 @@ class LatentDiffusion(DDPM):
 
         self.shorten_cond_schedule = self.num_timesteps_cond > 1
         if self.shorten_cond_schedule:
+            print("Warning, this has not been tested for the b-cosified model!")
             self.make_cond_schedule()
 
     def instantiate_first_stage(self, config):
@@ -643,8 +671,8 @@ class LatentDiffusion(DDPM):
     def _get_denoise_row_from_list(self, samples, desc='', force_no_decoder_quantization=False):
         denoise_row = []
         for zd in tqdm(samples, desc=desc):
-            denoise_row.append(self.decode_first_stage(self.bcos_to_image(zd.to(self.device)),
-                                                       force_not_quantize=force_no_decoder_quantization))
+            denoise_row.append(self.bcos_to_image(self.decode_first_stage(zd.to(self.device),
+                                                       force_not_quantize=force_no_decoder_quantization)))
         n_imgs_per_row = len(denoise_row)
         denoise_row = torch.stack(denoise_row)  # n_log_step, n_row, C, H, W
         denoise_grid = rearrange(denoise_row, 'n b c h w -> b n c h w')
@@ -816,7 +844,7 @@ class LatentDiffusion(DDPM):
             out.append(xc)
         return out
 
-    @torch.no_grad()
+    #@torch.no_grad()
     def decode_first_stage(self, z, predict_cids=False, force_not_quantize=False):
         if predict_cids:
             if z.dim() == 4:
@@ -827,7 +855,7 @@ class LatentDiffusion(DDPM):
         z = 1. / self.scale_factor * z
         return self.first_stage_model.decode(z)
 
-    @torch.no_grad()
+    #@torch.no_grad()
     def encode_first_stage(self, x):
         return self.first_stage_model.encode(x)
 
@@ -883,7 +911,10 @@ class LatentDiffusion(DDPM):
         return mean_flat(kl_prior) / np.log(2.0)
 
     def p_losses(self, x_start, cond, t, noise=None):
-        noise = default(noise, lambda: torch.randn_like(x_start))
+        if not exists(noise):
+            noise = torch.randn_like(x_start)
+            if self.encode_noise:
+                noise[...,3:,:,:] = -noise[...,:3,:,:]
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
         model_output = self.apply_model(x_noisy, t, cond)
 
@@ -966,7 +997,7 @@ class LatentDiffusion(DDPM):
         else:
             model_mean, _, model_log_variance = outputs
 
-        noise = noise_like(x.shape, device, repeat_noise) * temperature
+        noise = noise_like(x.shape, device, repeat_noise, self.encode_noise) * temperature
         if noise_dropout > 0.:
             noise = torch.nn.functional.dropout(noise, p=noise_dropout)
         # no noise when t == 0
@@ -994,6 +1025,9 @@ class LatentDiffusion(DDPM):
             b = batch_size = shape[0]
         if x_T is None:
             img = torch.randn(shape, device=self.device)
+            if self.encode_noise:
+                img[...,3:,:,:] = -img[...,:3,:,:]
+            img = self.mean + self.stdev*img
         else:
             img = x_T
         intermediates = []
@@ -1048,6 +1082,9 @@ class LatentDiffusion(DDPM):
         b = shape[0]
         if x_T is None:
             img = torch.randn(shape, device=device)
+            if self.encode_noise:
+                img[...,3:,:,:] = -img[...,:3,:,:]
+            img = self.mean + self.stdev*img
         else:
             img = x_T
 
@@ -1146,7 +1183,10 @@ class LatentDiffusion(DDPM):
 
     @torch.no_grad()
     def bcos_to_image(self, x):
-        return x # 2*x - 1
+        if self.encode_noise:
+            return x # 2*x - 1 # covered by ImageLogger...
+        else:
+            return x
 
     @torch.no_grad()
     def log_images(self, batch, N=8, n_row=4, sample=True, ddim_steps=50, ddim_eta=0., return_keys=None,
@@ -1158,10 +1198,12 @@ class LatentDiffusion(DDPM):
         use_ddim = ddim_steps is not None
 
         log = dict()
+        """ # print conditioning
         try:
             print(batch[self.cond_stage_key])
         except:
             pass
+        """
         z, c, x, xrec, xc = self.get_input(batch, self.first_stage_key,
                                            return_first_stage_outputs=True,
                                            force_c_encode=True,
@@ -1169,8 +1211,8 @@ class LatentDiffusion(DDPM):
                                            bs=N)
         N = min(x.shape[0], N)
         n_row = min(x.shape[0], n_row)
-        log["inputs"] = x
-        log["reconstruction"] = xrec
+        log["inputs"] = self.bcos_to_image(x)
+        log["reconstruction"] = self.bcos_to_image(xrec)
         if self.model.conditioning_key is not None:
             if hasattr(self.cond_stage_model, "decode"):
                 xc = self.cond_stage_model.decode(c)
@@ -1199,8 +1241,10 @@ class LatentDiffusion(DDPM):
                     t = repeat(torch.tensor([t]), '1 -> b', b=n_row)
                     t = t.to(self.device).long()
                     noise = torch.randn_like(z_start)
+                    if self.encode_noise:
+                        noise[...,3:,:,:] = -noise[...,:3,:,:]
                     z_noisy = self.q_sample(x_start=z_start, t=t, noise=noise)
-                    diffusion_row.append(self.decode_first_stage(self.bcos_to_image(z_noisy)))
+                    diffusion_row.append(self.bcos_to_image(self.decode_first_stage(z_noisy)))
 
             diffusion_row = torch.stack(diffusion_row)  # n_log_step, n_row, C, H, W
             diffusion_grid = rearrange(diffusion_row, 'n b c h w -> b n c h w')
@@ -1214,7 +1258,7 @@ class LatentDiffusion(DDPM):
                 samples, z_denoise_row = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,
                                                          ddim_steps=ddim_steps, eta=ddim_eta)
                 # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
-            x_samples = self.decode_first_stage(self.bcos_to_image(samples))
+            x_samples = self.bcos_to_image(self.decode_first_stage(samples))
             log["samples"] = x_samples
             if plot_denoise_rows:
                 denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
@@ -1229,7 +1273,7 @@ class LatentDiffusion(DDPM):
                                                              quantize_denoised=True)
                     # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True,
                     #                                      quantize_denoised=True)
-                x_samples = self.decode_first_stage(self.bcos_to_image(samples.to(self.device)))
+                x_samples = self.bcos_to_image(self.decode_first_stage(samples.to(self.device)))
                 log["samples_x0_quantized"] = x_samples
 
         if unconditional_guidance_scale > 1.0:
@@ -1242,7 +1286,7 @@ class LatentDiffusion(DDPM):
                                                  unconditional_guidance_scale=unconditional_guidance_scale,
                                                  unconditional_conditioning=uc,
                                                  )
-                x_samples_cfg = self.decode_first_stage(self.bcos_to_image(samples_cfg))
+                x_samples_cfg = self.bcos_to_image(self.decode_first_stage(samples_cfg))
                 log[f"samples_cfg_scale_{unconditional_guidance_scale:.2f}"] = x_samples_cfg
 
         if inpaint:
@@ -1255,7 +1299,7 @@ class LatentDiffusion(DDPM):
             with ema_scope("Plotting Inpaint"):
                 samples, _ = self.sample_log(cond=c, batch_size=N, ddim=use_ddim, eta=ddim_eta,
                                              ddim_steps=ddim_steps, x0=z[:N], mask=mask)
-            x_samples = self.decode_first_stage(self.bcos_to_image(samples.to(self.device)))
+            x_samples = self.bcos_to_image(self.decode_first_stage(samples.to(self.device)))
             log["samples_inpainting"] = x_samples
             log["mask"] = mask
 
@@ -1264,7 +1308,7 @@ class LatentDiffusion(DDPM):
             with ema_scope("Plotting Outpaint"):
                 samples, _ = self.sample_log(cond=c, batch_size=N, ddim=use_ddim, eta=ddim_eta,
                                              ddim_steps=ddim_steps, x0=z[:N], mask=mask)
-            x_samples = self.decode_first_stage(self.bcos_to_image(samples.to(self.device)))
+            x_samples = self.bcos_to_image(self.decode_first_stage(samples.to(self.device)))
             log["samples_outpainting"] = x_samples
 
         if plot_progressive_rows:
@@ -1310,7 +1354,7 @@ class LatentDiffusion(DDPM):
     def to_rgb(self, x):
         x = x.float()
         if not hasattr(self, "colorize"):
-            self.colorize = torch.randn(3, x.shape[1], 1, 1).to(x)
+            self.colorize = torch.randn(3, x.shape[1], 1, 1).to(x) # What does this do?
         x = nn.functional.conv2d(x, weight=self.colorize)
         x = 2. * (x - x.min()) / (x.max() - x.min()) - 1.
         return x
@@ -1443,6 +1487,8 @@ class LatentUpscaleDiffusion(LatentDiffusion):
                     t = repeat(torch.tensor([t]), '1 -> b', b=n_row)
                     t = t.to(self.device).long()
                     noise = torch.randn_like(z_start)
+                    if self.encode_noise:
+                        noise[...,3:,:,:] = -noise[...,:3,:,:]
                     z_noisy = self.q_sample(x_start=z_start, t=t, noise=noise)
                     diffusion_row.append(self.decode_first_stage(z_noisy))
 
@@ -1605,6 +1651,8 @@ class LatentFinetuneDiffusion(LatentDiffusion):
                     t = repeat(torch.tensor([t]), '1 -> b', b=n_row)
                     t = t.to(self.device).long()
                     noise = torch.randn_like(z_start)
+                    if self.encode_noise:
+                        noise[...,3:,:,:] = -noise[...,:3,:,:]
                     z_noisy = self.q_sample(x_start=z_start, t=t, noise=noise)
                     diffusion_row.append(self.decode_first_stage(z_noisy))
 

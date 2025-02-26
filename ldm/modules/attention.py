@@ -49,9 +49,9 @@ def init_(tensor):
 
 # feedforward
 class GEGLU(bcos.modules.common.DetachableModule):
-    def __init__(self, dim_in, dim_out, use_bcos=False, B=2, max_out=2):
+    def __init__(self, dim_in, dim_out, use_bcos=False, bcos_normalize=True, B=2, max_out=2):
         super().__init__()
-        self.proj = _bcos.linear(dim_in, dim_out * 2, use_bcos=use_bcos, b=B, max_out=max_out)
+        self.proj = _bcos.linear(dim_in, dim_out * 2, use_bcos=use_bcos, bcos_normalize=bcos_normalize, b=B, max_out=max_out)
 
     def forward(self, x):
         x, gate = self.proj(x).chunk(2, dim=-1)
@@ -61,19 +61,19 @@ class GEGLU(bcos.modules.common.DetachableModule):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, dim_out=None, mult=4, glu=False, dropout=0., use_bcos=False, B=2, max_out=2):
+    def __init__(self, dim, dim_out=None, mult=4, glu=False, dropout=0., use_bcos=False, bcos_normalize=True, B=2, max_out=2):
         super().__init__()
         inner_dim = int(dim * mult)
         dim_out = default(dim_out, dim)
         project_in = nn.Sequential(
-            _bcos.linear(dim, inner_dim, use_bcos=use_bcos, b=B, max_out=max_out),
+            _bcos.linear(dim, inner_dim, use_bcos=use_bcos, bcos_normalize=bcos_normalize, b=B, max_out=max_out),
             _bcos.GELU()
-        ) if not glu else GEGLU(dim, inner_dim, use_bcos=use_bcos, B=B, max_out=max_out)
+        ) if not glu else GEGLU(dim, inner_dim, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out)
 
         self.net = nn.Sequential(
             project_in,
             nn.Dropout(dropout),
-            _bcos.linear(inner_dim, dim_out, use_bcos=use_bcos, b=B, max_out=max_out)
+            _bcos.linear(inner_dim, dim_out, use_bcos=use_bcos, bcos_normalize=bcos_normalize, b=B, max_out=max_out)
         )
 
     def forward(self, x):
@@ -147,7 +147,7 @@ class SpatialSelfAttention(nn.Module):
 
 
 class CrossAttention(bcos.modules.common.DetachableModule): 
-    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0, use_bcos=False, B=2, max_out=2):
+    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0, use_bcos=False, bcos_normalize=True, B=2, max_out=2):
         super().__init__()
         inner_dim = dim_head * heads
         context_dim = default(context_dim, query_dim)
@@ -157,23 +157,24 @@ class CrossAttention(bcos.modules.common.DetachableModule):
 
         self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
         self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
-        self.to_v = _bcos.linear(context_dim, inner_dim, bias=False, use_bcos=use_bcos, b=B, max_out=max_out)
+        self.to_v = _bcos.linear(context_dim, inner_dim, bias=False, use_bcos=use_bcos, bcos_normalize=bcos_normalize, b=B, max_out=max_out)
 
         self.to_out = nn.Sequential(
-            _bcos.linear(inner_dim, query_dim, use_bcos=use_bcos, b=B, max_out=max_out),
+            _bcos.linear(inner_dim, query_dim, use_bcos=use_bcos, bcos_normalize=bcos_normalize, b=B, max_out=max_out),
             nn.Dropout(dropout)
         )
 
     def forward(self, x, context=None, mask=None):
         h = self.heads
 
-        if self.detach:
-            q = q.detach()
-            k = k.detach()
-
         q = self.to_q(x)
         context = default(context, x)
         k = self.to_k(context)
+        
+        if self.detach:
+            q = q.detach()
+            k = k.detach()
+        
         v = self.to_v(context)
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
@@ -260,7 +261,7 @@ class BasicTransformerBlock(nn.Module):
         "softmax-xformers": MemoryEfficientCrossAttention
     }
     def __init__(self, dim, n_heads, d_head, dropout=0., context_dim=None, gated_ff=True, checkpoint=True,
-                 disable_self_attn=False, use_bcos=False, B=2, max_out=2):
+                 disable_self_attn=False, use_bcos=False, bcos_normalize=True, B=2, max_out=2):
         super().__init__()
         attn_mode = "softmax-xformers" if XFORMERS_IS_AVAILBLE else "softmax"
         assert attn_mode in self.ATTENTION_MODES
@@ -268,11 +269,11 @@ class BasicTransformerBlock(nn.Module):
         self.disable_self_attn = disable_self_attn
         self.attn1 = attn_cls(query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout,
                               context_dim=context_dim if self.disable_self_attn else None,
-                              use_bcos=use_bcos, B=B, max_out=max_out)  # is a self-attention if not self.disable_self_attn
-        self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff, use_bcos=use_bcos, B=B, max_out=max_out)
+                              use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out)  # is a self-attention if not self.disable_self_attn
+        self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out)
         self.attn2 = attn_cls(query_dim=dim, context_dim=context_dim,
                               heads=n_heads, dim_head=d_head, dropout=dropout,
-                              use_bcos=use_bcos, B=B, max_out=max_out)  # is self-attn if context is none
+                              use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out)  # is self-attn if context is none
         self.norm1 = _bcos.LayerNorm(dim, use_bcos=use_bcos)
         self.norm2 = _bcos.LayerNorm(dim, use_bcos=use_bcos)
         self.norm3 = _bcos.LayerNorm(dim, use_bcos=use_bcos)
@@ -301,7 +302,7 @@ class SpatialTransformer(nn.Module):
                  depth=1, dropout=0., context_dim=None,
                  disable_self_attn=False, use_linear=False,
                  use_checkpoint=True, use_bcos=False, 
-                 B=2, max_out=2):
+                 bcos_normalize=True, B=2, max_out=2):
         super().__init__()
         if exists(context_dim) and not isinstance(context_dim, list):
             context_dim = [context_dim]
@@ -315,15 +316,16 @@ class SpatialTransformer(nn.Module):
                                      stride=1,
                                      padding=0,
                                      use_bcos=use_bcos,
+                                     bcos_normalize=bcos_normalize,
                                      B=B,
                                      max_out=max_out)
         else:
-            self.proj_in = _bcos.linear(in_channels, inner_dim, use_bcos=use_bcos, b=B, max_out=max_out)
+            self.proj_in = _bcos.linear(in_channels, inner_dim, use_bcos=use_bcos, bcos_normalize=bcos_normalize, b=B, max_out=max_out)
 
         self.transformer_blocks = nn.ModuleList(
             [BasicTransformerBlock(inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim[d],
                                    disable_self_attn=disable_self_attn, checkpoint=use_checkpoint,
-                                   use_bcos=use_bcos, B=B, max_out=max_out)
+                                   use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out)
                 for d in range(depth)]
         )
         if not use_linear:
@@ -333,10 +335,11 @@ class SpatialTransformer(nn.Module):
                                                   stride=1,
                                                   padding=0,
                                                   use_bcos=use_bcos,
+                                                  bcos_normalize=bcos_normalize,
                                                   B=B,
                                                   max_out=max_out))
         else:
-            self.proj_out = _bcos.zero_module(_bcos.linear(in_channels, inner_dim, use_bcos=use_bcos, b=B, max_out=max_out))
+            self.proj_out = _bcos.zero_module(_bcos.linear(in_channels, inner_dim, use_bcos=use_bcos, bcos_normalize=bcos_normalize, b=B, max_out=max_out))
         self.use_linear = use_linear
 
     def forward(self, x, context=None):

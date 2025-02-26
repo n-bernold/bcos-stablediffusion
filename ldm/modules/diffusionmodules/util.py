@@ -131,7 +131,7 @@ class CheckpointFunction(torch.autograd.Function):
         ctx.input_tensors = list(args[:length])
         ctx.input_params = list(args[length:])
         ctx.gpu_autocast_kwargs = {"enabled": torch.is_autocast_enabled(),
-                                   "dtype": torch.get_autocast_gpu_dtype(),
+                                   "dtype": torch.get_autocast_dtype('cuda'),
                                    "cache_enabled": torch.is_autocast_cache_enabled()}
         with torch.no_grad():
             output_tensors = ctx.run_function(*ctx.input_tensors)
@@ -153,8 +153,8 @@ class CheckpointFunction(torch.autograd.Function):
             output_grads,
             allow_unused=True,
         )
-        del ctx.input_tensors
-        del ctx.input_params
+        del ctx.input_tensors # Removed for explaining
+        del ctx.input_params # Removed for explaining
         del output_tensors
         return (None, None) + input_grads
 
@@ -273,13 +273,16 @@ class HybridConditioner(nn.Module):
         return {'c_concat': [c_concat], 'c_crossattn': [c_crossattn]}
 
 
-def noise_like(shape, device, repeat=False):
+def noise_like(shape, device, repeat=False, encode_noise=False):
     """ 6-channel noise?
     if shape[1]==6:
         repeat_noise = lambda: ((lambda x : torch.cat((x,1-x),dim=1))(torch.randn((1, 3, *shape[2:]), device=device))).repeat(shape[0], *((1,) * (len(shape) - 1)))
         lambda: ((lambda x : torch.cat((x,1-x),dim=1))(torch.randn((shape[0], 3, *shape[2:]), device=device)))
     else:
     """
+    if encode_noise:
+        tmp = torch.randn((1, 3, *shape[2:]), device=device).repeat(shape[0], *((1,) * (len(shape) - 1)))
+        return torch.cat((tmp,-tmp), dim=1)
     repeat_noise = lambda: torch.randn((1, *shape[1:]), device=device).repeat(shape[0], *((1,) * (len(shape) - 1)))
     noise = lambda: torch.randn(shape, device=device)
     return repeat_noise() if repeat else noise()

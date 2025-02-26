@@ -100,14 +100,14 @@ class Upsample(nn.Module):
                  upsampling occurs in the inner-two dimensions.
     """
 
-    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, use_bcos=False, B=2, max_out=2):
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, use_bcos=False, bcos_normalize=True, B=2, max_out=2):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
         self.use_conv = use_conv
         self.dims = dims
         if use_conv:
-            self.conv = _bcos.conv_nd(dims, self.channels, self.out_channels, 3, padding=padding, use_bcos=use_bcos, B=B, max_out=max_out)
+            self.conv = _bcos.conv_nd(dims, self.channels, self.out_channels, 3, padding=padding, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out)
 
     def forward(self, x):
         assert x.shape[1] == self.channels
@@ -145,7 +145,7 @@ class Downsample(nn.Module):
                  downsampling occurs in the inner-two dimensions.
     """
 
-    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, use_bcos=False, B=2, max_out=2):
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, use_bcos=False, bcos_normalize=True, B=2, max_out=2):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
@@ -154,7 +154,7 @@ class Downsample(nn.Module):
         stride = 2 if dims != 3 else (1, 2, 2)
         if use_conv:
             self.op = _bcos.conv_nd(
-                dims, self.channels, self.out_channels, 3, stride=stride, padding=padding, use_bcos=use_bcos, B=B, max_out=max_out
+                dims, self.channels, self.out_channels, 3, stride=stride, padding=padding, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out
             )
         else:
             assert self.channels == self.out_channels
@@ -194,6 +194,7 @@ class ResBlock(TimestepBlock):
         up=False,
         down=False,
         use_bcos=False,
+        bcos_normalize=True,
         B=2,
         max_out=2
     ):
@@ -209,17 +210,17 @@ class ResBlock(TimestepBlock):
         self.in_layers = nn.Sequential(
             _bcos.normalization(channels, use_bcos=use_bcos),
             _bcos.SiLU(use_bcos)(),
-            _bcos.conv_nd(dims, channels, self.out_channels, 3, padding=1, use_bcos=use_bcos, B=B, max_out=max_out),
+            _bcos.conv_nd(dims, channels, self.out_channels, 3, padding=1, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out),
         )
 
         self.updown = up or down
 
         if up:
-            self.h_upd = Upsample(channels, False, dims, use_bcos=use_bcos, B=B, max_out=max_out)
-            self.x_upd = Upsample(channels, False, dims, use_bcos=use_bcos, B=B, max_out=max_out)
+            self.h_upd = Upsample(channels, False, dims, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out)
+            self.x_upd = Upsample(channels, False, dims, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out)
         elif down:
-            self.h_upd = Downsample(channels, False, dims, use_bcos=use_bcos, B=B, max_out=max_out)
-            self.x_upd = Downsample(channels, False, dims, use_bcos=use_bcos, B=B, max_out=max_out)
+            self.h_upd = Downsample(channels, False, dims, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out)
+            self.x_upd = Downsample(channels, False, dims, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out)
         else:
             self.h_upd = self.x_upd = nn.Identity()
 
@@ -229,6 +230,7 @@ class ResBlock(TimestepBlock):
                 emb_channels,
                 2 * self.out_channels if use_scale_shift_norm else self.out_channels,
                 use_bcos=use_bcos,
+                bcos_normalize=bcos_normalize,
                 b=B,
                 max_out=max_out
             ),
@@ -238,7 +240,7 @@ class ResBlock(TimestepBlock):
             _bcos.SiLU(use_bcos)(),
             nn.Dropout(p=dropout),
             _bcos.zero_module(
-                _bcos.conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1, use_bcos=use_bcos, B=B, max_out=max_out)
+                _bcos.conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out)
             ),
         )
 
@@ -246,10 +248,10 @@ class ResBlock(TimestepBlock):
             self.skip_connection = nn.Identity()
         elif use_conv:
             self.skip_connection = _bcos.conv_nd(
-                dims, channels, self.out_channels, 3, padding=1, use_bcos=use_bcos, B=B, max_out=max_out
+                dims, channels, self.out_channels, 3, padding=1, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out
             )
         else:
-            self.skip_connection = _bcos.conv_nd(dims, channels, self.out_channels, 1, use_bcos=use_bcos, B=B, max_out=max_out)
+            self.skip_connection = _bcos.conv_nd(dims, channels, self.out_channels, 1, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out)
 
     def forward(self, x, emb):
         """
@@ -301,6 +303,7 @@ class AttentionBlock(bcos.modules.common.DetachableModule):
         use_checkpoint=False,
         use_new_attention_order=False,
         use_bcos=False,
+        bcos_normalize=True,
         B=2,
         max_out=2
     ):
@@ -316,15 +319,15 @@ class AttentionBlock(bcos.modules.common.DetachableModule):
         self.use_checkpoint = use_checkpoint
         self.norm = _bcos.normalization(channels, use_bcos)
         self.qk = conv_nd(1, channels, channels * 2, 1) 
-        self.v = _bcos.conv_nd(1, channels, channels, 1, use_bcos=use_bcos, B=B, max_out=max_out) 
+        self.v = _bcos.conv_nd(1, channels, channels, 1, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out) 
         if use_new_attention_order:
             # split qkv before split heads
-            self.attention = QKVAttention(self.num_heads, use_bcos=use_bcos, B=B, max_out=max_out) 
+            self.attention = QKVAttention(self.num_heads, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out) 
         else:
             # split heads before split qkv
             self.attention = QKVAttentionLegacy(self.num_heads)
 
-        self.proj_out = _bcos.zero_module(_bcos.conv_nd(1, channels, channels, 1))
+        self.proj_out = _bcos.zero_module(_bcos.conv_nd(1, channels, channels, 1, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out))
 
     def forward(self, x):
         return checkpoint(self._forward, (x,), self.parameters(), True)   # TODO: check checkpoint usage, is True # TODO: fix the .half call!!!
@@ -504,6 +507,8 @@ class UNetModel(nn.Module):
         use_linear_in_transformer=False,
         adm_in_channels=None,
         use_bcos=False,
+        bcos_normalize=True,
+        bcos_normalize_final=False,
         B=2,
         max_out=2
     ):
@@ -595,7 +600,7 @@ class UNetModel(nn.Module):
         self.input_blocks = nn.ModuleList(
             [
                 TimestepEmbedSequential(
-                    _bcos.conv_nd(dims, in_channels, model_channels, 3, padding=1, use_bcos=use_bcos, B=B, max_out=max_out)
+                    _bcos.conv_nd(dims, in_channels, model_channels, 3, padding=1, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out)
                 )
             ]
         )
@@ -615,6 +620,7 @@ class UNetModel(nn.Module):
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
                         use_bcos=use_bcos,
+                        bcos_normalize=bcos_normalize,
                         B=B,
                         max_out=max_out
                     )
@@ -643,12 +649,13 @@ class UNetModel(nn.Module):
                                 num_head_channels=dim_head,
                                 use_new_attention_order=use_new_attention_order,
                                 use_bcos=use_bcos,
+                                bcos_normalize=bcos_normalize,
                                 B=B,
                                 max_out=max_out
                             ) if not use_spatial_transformer else SpatialTransformer(
                                 ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim,
                                 disable_self_attn=disabled_sa, use_linear=use_linear_in_transformer,
-                                use_checkpoint=use_checkpoint, use_bcos=use_bcos, B=B, max_out=max_out
+                                use_checkpoint=use_checkpoint, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out
                             )
                         )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
@@ -668,12 +675,13 @@ class UNetModel(nn.Module):
                             use_scale_shift_norm=use_scale_shift_norm,
                             down=True,
                             use_bcos=use_bcos,
+                            bcos_normalize=bcos_normalize,
                             B=B,
                             max_out=max_out
                         )
                         if resblock_updown
                         else Downsample(
-                            ch, conv_resample, dims=dims, out_channels=out_ch, use_bcos=use_bcos, B=B, max_out=max_out
+                            ch, conv_resample, dims=dims, out_channels=out_ch, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out
                         )
                     )
                 )
@@ -699,6 +707,7 @@ class UNetModel(nn.Module):
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
                 use_bcos=use_bcos,
+                bcos_normalize=bcos_normalize,
                 B=B,
                 max_out=max_out
             ),
@@ -709,12 +718,13 @@ class UNetModel(nn.Module):
                 num_head_channels=dim_head,
                 use_new_attention_order=use_new_attention_order,
                 use_bcos=use_bcos,
+                bcos_normalize=bcos_normalize,
                 B=B,
                 max_out=max_out
             ) if not use_spatial_transformer else SpatialTransformer( # always uses a self-attn
                             ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim,
                             disable_self_attn=disable_middle_self_attn, use_linear=use_linear_in_transformer,
-                            use_checkpoint=use_checkpoint, use_bcos=use_bcos, B=B, max_out=max_out
+                            use_checkpoint=use_checkpoint, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out
                         ),
             ResBlock(
                 ch,
@@ -724,6 +734,7 @@ class UNetModel(nn.Module):
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
                 use_bcos=use_bcos,
+                bcos_normalize=bcos_normalize,
                 B=B,
                 max_out=max_out
             ),
@@ -744,6 +755,7 @@ class UNetModel(nn.Module):
                         use_checkpoint=use_checkpoint,
                         use_scale_shift_norm=use_scale_shift_norm,
                         use_bcos=use_bcos,
+                        bcos_normalize=bcos_normalize,
                         B=B,
                         max_out=max_out
                     )
@@ -772,6 +784,7 @@ class UNetModel(nn.Module):
                                 num_head_channels=dim_head,
                                 use_new_attention_order=use_new_attention_order,
                                 use_bcos=use_bcos,
+                                bcos_normalize=bcos_normalize,
                                 B=B,
                                 max_out=max_out
                             ) if not use_spatial_transformer else SpatialTransformer(
@@ -779,6 +792,7 @@ class UNetModel(nn.Module):
                                 disable_self_attn=disabled_sa, use_linear=use_linear_in_transformer,
                                 use_checkpoint=use_checkpoint,
                                 use_bcos=use_bcos,
+                                bcos_normalize=bcos_normalize,
                                 B=B,
                                 max_out=max_out
                             )
@@ -796,11 +810,12 @@ class UNetModel(nn.Module):
                             use_scale_shift_norm=use_scale_shift_norm,
                             up=True,
                             use_bcos=use_bcos,
+                            bcos_normalize=bcos_normalize,
                             B=B,
                             max_out=max_out
                         )
                         if resblock_updown
-                        else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch, use_bcos=use_bcos, B=B, max_out=max_out)
+                        else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out)
                     )
                     ds //= 2
                 self.output_blocks.append(TimestepEmbedSequential(*layers))
@@ -809,12 +824,20 @@ class UNetModel(nn.Module):
         self.out = nn.Sequential(
             _bcos.normalization(ch, use_bcos=use_bcos), 
             _bcos.SiLU(use_bcos)(),
-            _bcos.zero_module(_bcos.conv_nd(dims, model_channels, out_channels, 3, padding=1, use_bcos=use_bcos, B=B, max_out=max_out)),
+            _bcos.zero_module(_bcos.conv_nd(dims, 
+                model_channels, 
+                out_channels, 
+                3, 
+                padding=1, 
+                use_bcos=use_bcos, 
+                bcos_normalize=bcos_normalize_final, # Makes it easier for model to modulate output?
+                B=B, 
+                max_out=max_out)),
         )
         if self.predict_codebook_ids:
             self.id_predictor = nn.Sequential(
             _bcos.normalization(ch, use_bcos),
-            _bcos.conv_nd(dims, model_channels, n_embed, 1, use_bcos=use_bcos, B=B, max_out=max_out),
+            _bcos.conv_nd(dims, model_channels, n_embed, 1, use_bcos=use_bcos, bcos_normalize=bcos_normalize, B=B, max_out=max_out),
             #nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
         )
 
@@ -843,7 +866,6 @@ class UNetModel(nn.Module):
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
-
         assert (y is not None) == (
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"

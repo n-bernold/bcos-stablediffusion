@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 1.0e-4
+  base_learning_rate: 1.0e-5
   target: ldm.models.diffusion.ddpm.LatentDiffusion
   params:
     linear_start: 0.00085
@@ -14,7 +14,7 @@ model:
     cond_stage_trainable: false
     conditioning_key: crossattn
     monitor: val/loss_simple_ema
-    scale_factor: 0.18215 # [-1,1]: 0.6437889933586121 # [0,1]: 0.27907317876815796
+    scale_factor: 1.0 # Original: 0.18215 # [-1,1]: 0.6437889933586121 # [0,1]: 0.27907317876815796
     use_ema: False # Setting this to true uses too much VRAM :(
     encode_noise: True
 
@@ -103,19 +103,20 @@ data:
 lightning:
   modelcheckpoint:
     params:
-      every_n_epochs: 1
+      every_n_epochs: 3
   callbacks:
     image_logger:
       target: main.ImageLogger
       params:
-        batch_frequency: 100000
+        batch_frequency: 50000
         max_images: 8
         increase_log_steps: False
+        rescale: False # set to false if encode_noise and positive are True 
         log_images_kwargs: 
           inpaint: False
   trainer:
     benchmark: True
-    max_steps: 1700000
+    max_steps: 1000000
     accumulate_grad_batches: 1
     auto_select_gpus: True
     gradient_clip_val: 1

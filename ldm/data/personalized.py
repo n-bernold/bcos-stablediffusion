@@ -15,11 +15,15 @@ class PersonalizedBase(Dataset):
                  data_root,
                  n=None,
                  cache=None,
+                 val=False,
                  cond_stage_config=None,
+                 positive=True,
                  flip_p=0.5 # currently unused
                  ):
 
         self.data_root = data_root
+        if val:
+            self.data_root = os.path.join(self.data_root, 'val')
 
         #self.image_paths = [os.path.join(self.data_root, file_path) for file_path in os.listdir(os.path.join(self.data_root, 'imgs'))]
 
@@ -37,8 +41,8 @@ class PersonalizedBase(Dataset):
         """
         self.flip = transforms.RandomHorizontalFlip(p=flip_p)
         self.cache = cache
-
         self.cond_stage_config = cond_stage_config
+        self.positive = positive
         self.initData()
 
     def initData(self):
@@ -50,6 +54,12 @@ class PersonalizedBase(Dataset):
                 if self._length is not None:
                     random.shuffle(self._data)
                     self._data = self._data[:min(len(self._data), self._length)]
+
+                # This is a bit of a hacky way. Just make sure to load the correctly cached dataset...
+                if self.positive and self._data[0]["image"].min() < 0:  
+                    for dat in self._data:
+                        dat["image"][:,:,:3] = (dat["image"][:,:,:3]+1)/2
+                        dat["image"][:,:,3:] = 1 - dat["image"][:,:,:3]
                 self._length = len(self._data)
                 return
 
@@ -71,8 +81,10 @@ class PersonalizedBase(Dataset):
             #image = Image.fromarray(img)
             #image = self.flip(image)
             image = np.array(image).astype(np.uint8)
-            #image = (image / 255).astype(np.float32) # TODO: or 16? and remove offset
-            image = (image / 127.5 - 1.0).astype(np.float32) # TODO: or 16? and remove offset
+            if self.positive:
+                image = (image / 255).astype(np.float32) 
+            else:
+                image = (image / 127.5 - 1.0).astype(np.float32) 
             example["image"] =  torch.from_numpy(np.concatenate((image, 1-image), axis=2))
             
             if self.cond_stage_config:
@@ -82,7 +94,8 @@ class PersonalizedBase(Dataset):
             return example
 
         self._data = [initImage(x, y) for x, y in zip(df['key'], df['caption'])]
-        del model
+        if self.cond_stage_config:
+            del model
         
         if self.cache:
             cachepath = os.path.join(self.data_root, self.cache)
