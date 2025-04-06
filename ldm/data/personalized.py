@@ -24,21 +24,8 @@ class PersonalizedBase(Dataset):
         self.data_root = data_root
         if val:
             self.data_root = os.path.join(self.data_root, 'val')
-
-        #self.image_paths = [os.path.join(self.data_root, file_path) for file_path in os.listdir(os.path.join(self.data_root, 'imgs'))]
-
         self._length = n
-        
-        
-        """
-        # done in preprocessing already
-        self.size = size 
-        self.interpolation = {# "linear": PIL.Image.Resampling.LINEAR, # Linear no longer exists? 
-                              "bilinear": PIL.Image.Resampling.BILINEAR,
-                              "bicubic": PIL.Image.Resampling.BICUBIC,
-                              "lanczos": PIL.Image.Resampling.LANCZOS,
-                              }[interpolation]
-        """
+
         self.flip = transforms.RandomHorizontalFlip(p=flip_p)
         self.cache = cache
         self.cond_stage_config = cond_stage_config

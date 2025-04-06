@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 2.0e-6
+  base_learning_rate: 4.0e-5
   target: ldm.models.diffusion.ddpm.LatentDiffusion
   params:
     linear_start: 0.00085
@@ -9,12 +9,13 @@ model:
     timesteps: 1000
     first_stage_key: "image"
     cond_stage_key: "caption"
+    parameterization: "full_eps"
     image_size: 64
     channels: 6 # Changed from 4
     cond_stage_trainable: false
     conditioning_key: crossattn
     monitor: val/loss_simple_ema
-    scale_factor: 1.0 # Original: 0.18215 # [-1,1]: 0.6437889933586121 # [0,1]: 0.27907317876815796
+    scale_factor: 1.0
     use_ema: False # Setting this to true uses too much VRAM :(
     encode_noise: True
     mean: 0.5
@@ -40,51 +41,27 @@ model:
         legacy: False
         use_bcos: False
         bcos_normalize: True
+        bcos_normalize_final: True
         B: 2
         max_out: 1
 
     first_stage_config: 
       target: ldm.models.autoencoder.IdentityFirstStage
-       # params:
-        # embed_dim: 4
-        # monitor: val/rec_loss
-        # ddconfig:
-          # #attn_type: "vanilla-xformers"
-          # double_z: true
-          # z_channels: 4
-          # resolution: 256
-          # in_channels: 3
-          # out_ch: 3
-          # ch: 128
-          # ch_mult:
-          # - 1
-          # - 2
-          # - 4
-          # - 4
-          # num_res_blocks: 2
-          # attn_resolutions: []
-          # dropout: 0.0
-        # lossconfig:
-          # target: torch.nn.Identity
 
     cond_stage_config: 
       target: ldm.models.autoencoder.IdentityFirstStage
-      #target: ldm.modules.encoders.modules.FrozenOpenCLIPEmbedder
-      #params:
-      #  freeze: True
-      #  layer: "penultimate"
+
 data:
   target: main.DataModuleFromConfig
   params:
     batch_size: 3
-    num_workers: 3
+    num_workers: 2
     wrap: false
     train:
       target: ldm.data.personalized.PersonalizedBase
       params:
-        n: 100000
-        cache: "pbfgp100k.pt"
-        positive: True
+        n: 10
+        cache: "debug.pt"
         cond_stage_config: 
           target: ldm.modules.encoders.modules.FrozenOpenCLIPEmbedder
           params:
@@ -96,7 +73,6 @@ data:
         n: 5
         cache: "val.pt"
         val: True
-        positive: True
         cond_stage_config: 
           target: ldm.modules.encoders.modules.FrozenOpenCLIPEmbedder
           params:
@@ -105,20 +81,22 @@ data:
 lightning:
   modelcheckpoint:
     params:
-      every_n_epochs: 3
+      every_n_train_steps: 100000
   callbacks:
     image_logger:
       target: main.ImageLogger
       params:
-        batch_frequency: 50000
+        batch_frequency: 200
         max_images: 8
         increase_log_steps: False
         rescale: False # set to false if encode_noise and positive are True 
         log_images_kwargs: 
           inpaint: False
+
   trainer:
     benchmark: True
-    max_steps: 1000000
+    max_steps: 5000
     accumulate_grad_batches: 1
-    auto_select_gpus: True
     gpus: "-1"
+    auto_select_gpus: True
+

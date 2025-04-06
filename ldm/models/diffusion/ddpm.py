@@ -84,7 +84,7 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
                  stdev=1
                  ):
         super().__init__()
-        assert parameterization in ["eps", "x0", "v"], 'currently only supporting "eps" and "x0" and "v"'
+        assert parameterization in ["full_eps", "eps", "x0", "v"], 'currently only supporting "full_eps", "eps" and "x0" and "v"'
         self.parameterization = parameterization
         print(f"{self.__class__.__name__}: Running in {self.parameterization}-prediction mode")
         self.cond_stage_model = None
@@ -186,7 +186,8 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
             (1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod)))
         self.register_buffer('posterior_mean_coef3', to_torch(
             1 - (betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod) + (1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod))))
-        if self.parameterization == "eps":
+        if self.parameterization == "eps" or self.parameterization == "full_eps":
+            # TODO: Is this actually correct for full_eps?
             lvlb_weights = self.betas ** 2 / (
                     2 * self.posterior_variance * to_torch(alphas) * (1 - self.alphas_cumprod))
         elif self.parameterization == "x0":
@@ -293,7 +294,14 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
     def predict_start_from_noise(self, x_t, t, noise): 
         return (
                 extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
-                extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * self.stdev*noise +
+                extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * self.stdev * noise +
+                extract_into_tensor(self.one_minus_recip_sqrt_alphas_cumprod, t, x_t.shape) * self.mean
+        )
+
+    def predict_start_from_full_noise(self, x_t, t, noise):
+        return (
+                extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
+                extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * (noise - self.mean) +
                 extract_into_tensor(self.one_minus_recip_sqrt_alphas_cumprod, t, x_t.shape) * self.mean
         )
 
@@ -328,6 +336,8 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
         model_out = self.model(x, t)
         if self.parameterization == "eps":
             x_recon = self.predict_start_from_noise(x, t=t, noise=model_out)
+        elif self.parameterization == "full_eps":
+            x_recon = self.predict_start_from_full_noise(x, t=t, noise=model_out)
         elif self.parameterization == "x0":
             x_recon = model_out
         if clip_denoised:
@@ -412,6 +422,8 @@ class DDPM(BcosUtilMixin, pl.LightningModule):
         loss_dict = {}
         if self.parameterization == "eps":
             target = noise
+        elif self.parameterization == "full_eps":
+            target = self.mean + self.stdev * noise
         elif self.parameterization == "x0":
             target = x_start
         elif self.parameterization == "v":
@@ -923,6 +935,8 @@ class LatentDiffusion(DDPM):
 
         if self.parameterization == "x0":
             target = x_start
+        elif self.parameterization == "full_eps":
+            target = self.mean + self.stdev * noise
         elif self.parameterization == "eps":
             target = noise
         elif self.parameterization == "v":
@@ -962,6 +976,8 @@ class LatentDiffusion(DDPM):
 
         if self.parameterization == "eps":
             x_recon = self.predict_start_from_noise(x, t=t, noise=model_out)
+        elif self.parameterization == "full_eps":
+            x_recon = self.predict_start_from_full_noise(x, t=t, noise=model_out)
         elif self.parameterization == "x0":
             x_recon = model_out
         else:
@@ -1074,7 +1090,7 @@ class LatentDiffusion(DDPM):
     def p_sample_loop(self, cond, shape, return_intermediates=False,
                       x_T=None, verbose=True, callback=None, timesteps=None, quantize_denoised=False,
                       mask=None, x0=None, img_callback=None, start_T=None,
-                      log_every_t=None):
+                      log_every_t=None, **kwargs):
 
         if not log_every_t:
             log_every_t = self.log_every_t
@@ -1140,7 +1156,7 @@ class LatentDiffusion(DDPM):
                                   shape,
                                   return_intermediates=return_intermediates, x_T=x_T,
                                   verbose=verbose, timesteps=timesteps, quantize_denoised=quantize_denoised,
-                                  mask=mask, x0=x0)
+                                  mask=mask, x0=x0, **kwargs)
 
     @torch.no_grad()
     def sample_log(self, cond, batch_size, ddim, ddim_steps, **kwargs):

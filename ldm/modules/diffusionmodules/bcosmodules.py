@@ -12,8 +12,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-# We use a custom implementation of BcosConv2d and BcosLinear as B-cosification does not necessarily require unit weights.
+# We somtimes use a custom implementation of BcosConv2d and BcosLinear as B-cosification does not necessarily require unit weights.
 # The code is copied from https://github.com/B-cos/B-cos-v2/blob/main/bcos/modules/
+# In retrospect, it would have been easier to just scale the outputs with a nn.Parameter
 
 class BcosConv2d(DetachableModule):
     """

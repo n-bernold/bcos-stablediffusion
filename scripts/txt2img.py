@@ -11,7 +11,6 @@ from torchvision.utils import make_grid
 from pytorch_lightning import seed_everything
 from torch import autocast
 from contextlib import nullcontext
-from imwatermark import WatermarkEncoder
 
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
@@ -25,20 +24,27 @@ def chunk(it, size):
     return iter(lambda: tuple(islice(it, size)), ())
 
 
-def load_model_from_config(config, ckpt, device=torch.device("cuda"), verbose=False):
-    print(f"Loading model from {ckpt}")
-    pl_sd = torch.load(ckpt, map_location="cpu")
-    if "global_step" in pl_sd:
-        print(f"Global Step: {pl_sd['global_step']}")
-    sd = pl_sd["state_dict"]
+def load_model_from_config(config, ckpt=None, device=torch.device("cuda"), verbose=False):
+    if ckpt == "None":
+        ckpt = None
+    if ckpt is not None:
+        print(f"Loading model from {ckpt}")
+        if device == torch.device("cuda"):
+            pl_sd = torch.load(ckpt)
+        elif device == torch.device("cpu"):
+            pl_sd = torch.load(ckpt, map_location="cpu")
+        if "global_step" in pl_sd:
+            print(f"Global Step: {pl_sd['global_step']}")
+        sd = pl_sd["state_dict"]
     model = instantiate_from_config(config.model)
-    m, u = model.load_state_dict(sd, strict=False)
-    if len(m) > 0 and verbose:
-        print("missing keys:")
-        print(m)
-    if len(u) > 0 and verbose:
-        print("unexpected keys:")
-        print(u)
+    if ckpt is not None:
+        m, u = model.load_state_dict(sd, strict=False)
+        if len(m) > 0 and verbose:
+            print("missing keys:")
+            print(m)
+        if len(u) > 0 and verbose:
+            print("unexpected keys:")
+            print(u)
 
     if device == torch.device("cuda"):
         model.cuda()
@@ -57,7 +63,7 @@ def parse_args():
         "--prompt",
         type=str,
         nargs="?",
-        default="a professional photograph of an astronaut riding a triceratops",
+        default="A photo of a goat and a flamingo",
         help="the prompt to render"
     )
     parser.add_argument(
@@ -103,25 +109,25 @@ def parse_args():
     parser.add_argument(
         "--H",
         type=int,
-        default=512,
+        default=64,
         help="image height, in pixel space",
     )
     parser.add_argument(
         "--W",
         type=int,
-        default=512,
+        default=64,
         help="image width, in pixel space",
     )
     parser.add_argument(
         "--C",
         type=int,
-        default=4,
+        default=6,
         help="latent channels",
     )
     parser.add_argument(
         "--f",
         type=int,
-        default=8,
+        default=1,
         help="downsampling factor, most often 8 or 16",
     )
     parser.add_argument(
@@ -150,7 +156,7 @@ def parse_args():
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/stable-diffusion/v2-inference.yaml",
+        default="configs/stable-diffusion/v2-bcos-inference.yaml",
         help="path to config which constructs model",
     )
     parser.add_argument(
@@ -216,6 +222,7 @@ def main(opt):
 
     config = OmegaConf.load(f"{opt.config}")
     device = torch.device("cuda") if opt.device == "cuda" else torch.device("cpu")
+    print("Device: ", device)
     model = load_model_from_config(config, f"{opt.ckpt}", device)
 
     if opt.plms:
@@ -227,11 +234,6 @@ def main(opt):
 
     os.makedirs(opt.outdir, exist_ok=True)
     outpath = opt.outdir
-
-    print("Creating invisible watermark encoder (see https://github.com/ShieldMnt/invisible-watermark)...")
-    wm = "SDV2"
-    wm_encoder = WatermarkEncoder()
-    wm_encoder.set_watermark('bytes', wm.encode('utf-8'))
 
     batch_size = opt.n_samples
     n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
@@ -256,9 +258,10 @@ def main(opt):
     start_code = None
     if opt.fixed_code:
         start_code = torch.randn([opt.n_samples, opt.C, opt.H // opt.f, opt.W // opt.f], device=device)
+        #start_code[:,3:,:,:] = 1- start_code[:,:3,:,:]
 
     if opt.torchscript or opt.ipex:
-        transformer = model.cond_stage_model.model
+        transformer = model.cond_stage_model.model # TODO
         unet = model.model.diffusion_model
         decoder = model.first_stage_model.decoder
         additional_context = torch.cpu.amp.autocast() if opt.bf16 else nullcontext()
@@ -315,9 +318,14 @@ def main(opt):
             prompts = list(prompts)
 
         with torch.no_grad(), additional_context:
-            for _ in range(3):
+            for _ in range(1): # Why does the original code here loop three times?
                 c = model.get_learned_conditioning(prompts)
-            samples_ddim, _ = sampler.sample(S=5,
+            if False:
+                samples_ddim, _ = model.sample(c, batch_size=batch_size,
+                                             shape=shape,
+                                             verbose=False)
+            else:
+                samples_ddim, _ = sampler.sample(S=5,
                                              conditioning=c,
                                              batch_size=batch_size,
                                              shape=shape,
@@ -326,8 +334,9 @@ def main(opt):
                                              unconditional_conditioning=uc,
                                              eta=opt.ddim_eta,
                                              x_T=start_code)
+            
             print("Running a forward pass for decoder")
-            for _ in range(3):
+            for _ in range(1): # Why does the original code here loop three times?
                 x_samples_ddim = model.decode_first_stage(samples_ddim)
 
     precision_scope = autocast if opt.precision=="autocast" or opt.bf16 else nullcontext
@@ -355,12 +364,13 @@ def main(opt):
                                                      x_T=start_code)
 
                     x_samples = model.decode_first_stage(samples)
-                    x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
+                    x_samples = torch.clamp(x_samples, min=0.0, max=1.0)
 
                     for x_sample in x_samples:
                         x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+                        x_sample = x_sample[:,:,:3]
                         img = Image.fromarray(x_sample.astype(np.uint8))
-                        img = put_watermark(img, wm_encoder)
+                        img = put_watermark(img, None)
                         img.save(os.path.join(sample_path, f"{base_count:05}.png"))
                         base_count += 1
                         sample_count += 1
@@ -374,8 +384,9 @@ def main(opt):
 
             # to image
             grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
+            grid = grid[:,:,:3]
             grid = Image.fromarray(grid.astype(np.uint8))
-            grid = put_watermark(grid, wm_encoder)
+            grid = put_watermark(grid, None)
             grid.save(os.path.join(outpath, f'grid-{grid_count:04}.png'))
             grid_count += 1
 

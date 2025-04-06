@@ -9,12 +9,13 @@ model:
     timesteps: 1000
     first_stage_key: "image"
     cond_stage_key: "caption"
+    parameterization: "x0"
     image_size: 64
     channels: 6 # Changed from 4
     cond_stage_trainable: false
     conditioning_key: crossattn
     monitor: val/loss_simple_ema
-    scale_factor: 1.0 # Original: 0.18215 # [-1,1]: 0.6437889933586121 # [0,1]: 0.27907317876815796
+    scale_factor: 1.0
     use_ema: False # Setting this to true uses too much VRAM :(
     encode_noise: True
     mean: 0.5
@@ -38,8 +39,9 @@ model:
         transformer_depth: 1 
         context_dim: 1024 
         legacy: False
-        use_bcos: False
+        use_bcos: True
         bcos_normalize: True
+        bcos_normalize_final: True
         B: 2
         max_out: 1
 
@@ -122,3 +124,7 @@ lightning:
     accumulate_grad_batches: 1
     auto_select_gpus: True
     gpus: "-1"
+  logger:
+    target: pytorch_lightning.loggers.WandbLogger
+    params: 
+      project: "SD"

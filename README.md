@@ -6,7 +6,7 @@ B-cos networks are a variation of Deep Neural Networks which promote interpretab
 
 This is a fork of of the [Stable Diffusion 2.1](https://github.com/Stability-AI/stablediffusion) repository.
 The code for training was adapted from an open-source [Dreambooth](https://github.com/tomasyany/dreambooth) repository.
-The [b-cos library](https://github.com/B-cos/B-cos-v2/) is used whenever possible but modules have also been copied and modified.
+The [b-cos library](https://github.com/B-cos/B-cos-v2/) is used whenever possible but some modules have also been copied and modified.
 
 ________________________________
   
@@ -20,6 +20,9 @@ However, the minor additions have and changes have not been properly added to th
 While the xformers library provides many benefits, it is not (yet) compatible with the B-cos explanation mode.
 The adaption should be relatively straight forward but we did not do that yet. 
 
+#### incompatible parts of the code
+Some settings are currently not supported despite them not being removed from the code.
+The example Jupyter notebook should provide some guidance on how things work.
 
 
 

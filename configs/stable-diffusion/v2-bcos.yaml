@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 1.0e-5
+  base_learning_rate: 2.0e-6
   target: ldm.models.diffusion.ddpm.LatentDiffusion
   params:
     linear_start: 0.00085
@@ -14,9 +14,11 @@ model:
     cond_stage_trainable: false
     conditioning_key: crossattn
     monitor: val/loss_simple_ema
-    scale_factor: 1.0 # Original: 0.18215 # [-1,1]: 0.6437889933586121 # [0,1]: 0.27907317876815796
+    scale_factor: 1.0 
     use_ema: False # Setting this to true uses too much VRAM :(
     encode_noise: True
+    mean: 0.5
+    stdev: 0.5
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
@@ -119,8 +121,6 @@ lightning:
     max_steps: 1000000
     accumulate_grad_batches: 1
     auto_select_gpus: True
-    gradient_clip_val: 1
-    #profiler: "simple"
     gpus: "-1"
     logger:
       target: pytorch_lightning.loggers.WandbLogger

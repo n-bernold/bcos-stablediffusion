@@ -14,11 +14,11 @@ model:
     cond_stage_trainable: false
     conditioning_key: crossattn
     monitor: val/loss_simple_ema
-    scale_factor: 1.0 # Original: 0.18215 # [-1,1]: 0.6437889933586121 # [0,1]: 0.27907317876815796
+    scale_factor: 1.0 
     use_ema: False # Setting this to true uses too much VRAM :(
     encode_noise: True
-    mean: 0.5
-    stdev: 0.5
+    mean: 0.0
+    stdev: 1.0
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
@@ -38,7 +38,7 @@ model:
         transformer_depth: 1 
         context_dim: 1024 
         legacy: False
-        use_bcos: False
+        use_bcos: True
         bcos_normalize: True
         B: 2
         max_out: 1
@@ -118,7 +118,7 @@ lightning:
           inpaint: False
   trainer:
     benchmark: True
-    max_steps: 1000000
+    max_steps: 2000000
     accumulate_grad_batches: 1
     auto_select_gpus: True
     gpus: "-1"
